@@ -1,0 +1,11 @@
+.venv/
+.state/
+__pycache__/
+*.pyc
+.DS_Store
+.env
+.env.*
+.codex/
+*.log
+# These local notes may describe personal materials and machine details.
+验收记录.md

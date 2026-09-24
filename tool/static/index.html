@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#f7f5ef">
+  <title>Still · 慢慢听</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="site-header">
+    <button class="brand" id="home" aria-label="Still 素材库"><span class="brand-mark">s.</span><span class="brand-word">Still<span class="brand-cn">慢慢听</span></span></button>
+    <nav aria-label="主导航"><button class="nav-link active" id="library-nav">我的素材库</button><button class="nav-link" id="guide-nav">使用指南</button></nav>
+    <div class="connection" id="connection"><span class="status-dot"></span> 本地学习空间</div>
+  </header>
+  <main id="app"><div class="loading"><span class="spinner"></span>正在打开你的学习空间…</div></main>
+  <footer class="site-footer"><span>STILL / A LITTLE, EVERY DAY.</span><span>从喜欢的生活里，学会另一种表达。</span></footer>
+  <dialog id="import-dialog">
+    <form method="dialog"><button class="dialog-close icon-button" aria-label="关闭">×</button></form>
+    <div class="eyebrow">A NEW BEGINNING</div><h2>下一段故事，从这里开始。</h2>
+    <p class="muted">粘贴视频链接，让它变成可以反复练习的英语。</p>
+    <form id="download-form">
+      <label class="field-label" for="video-url">视频链接</label>
+      <input id="video-url" type="url" placeholder="https://www.youtube.com/watch?v=…" required>
+      <label class="checkbox-row"><input id="auto-ai" type="checkbox" checked><span>同时生成中文翻译与逐句讲解<small>使用当前 ChatGPT 账号的 Codex 用量；完成后可离线学习。</small></span></label>
+      <details class="advanced"><summary>下载遇到登录验证？</summary><label for="cookie-browser">使用已登录的浏览器</label><select id="cookie-browser"><option value="">不读取浏览器登录信息</option value="chrome">Chrome</option><option value="safari">Safari</option><option value="edge">Edge</option><option value="firefox">Firefox</option></select><p>仅在你选择后读取该浏览器的登录信息，用于下载视频。</p></details>
+      <div id="download-error" class="inline-error" role="alert"></div>
+      <button class="button primary full" type="submit">制作学习素材包 <span>↗</span></button>
+    </form>
+    <div class="or"><span>或者，继续已有的故事</span></div>
+    <button class="drop-zone compact" id="dialog-import"><span class="folder-glyph">↳</span><span>选择素材包文件夹<small>也可以把整个文件夹拖到窗口里</small></span></button>
+  </dialog>
+  <dialog id="guide-dialog">
+    <form method="dialog"><button class="dialog-close icon-button" aria-label="关闭">×</button></form>
+    <div class="eyebrow">MAKE IT YOURS</div><h2>每天几句，慢慢听懂。</h2>
+    <ol class="guide-steps"><li><b>先看一遍，走进故事</b><p>选择「完整观看」，用英文字幕或无字幕感受视频。</p></li><li><b>选一句，反复听清</b><p>点击右侧语句进入精听。可以循环、慢放，也可以先不看原文，写下你听到的内容。</p></li><li><b>看懂之后，再说一遍</b><p>打开词句讲解，理解意思和用法。跟读模仿，或用学到的表达造一个自己的句子。</p></li><li><b>把进步留在这里</b><p>收藏难句、标记已掌握，下次从上次的位置继续。素材包是工程根目录中的文件夹，可直接复制备份。</p></li></ol>
+    <div class="shortcut-guide"><span><kbd>Space</kbd> 播放 / 暂停</span><span><kbd>←</kbd><kbd>→</kbd> 上下句</span><span><kbd>R</kbd> 重听</span><span><kbd>L</kbd> 循环</span><span><kbd>C</kbd> 字幕切换</span></div>
+    <p class="fine-print">AI 讲解根据字幕生成；发音提示是常见规律，需对照原音确认。自动字幕也可能存在识别误差。</p>
+  </dialog>
+  <input id="folder-input" type="file" webkitdirectory multiple hidden>
+  <input id="caption-input" type="file" accept=".srt,.vtt,.json3" hidden>
+  <div id="drag-overlay" hidden><div><span>↳</span><h2>把故事放在这里</h2><p>松开鼠标，导入素材包文件夹</p></div></div>
+  <div id="toast" role="status" aria-live="polite"></div>
+</body>
+</html>

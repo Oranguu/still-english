@@ -1,4 +1,4 @@
-# The root stores personal material packages. Only reviewed source is public.
+# Only reviewed source is public; personal materials and review notes stay local.
 /*
 !/.gitignore
 !/README.md
@@ -15,6 +15,7 @@
 !/tool/jobs.py
 !/tool/launcher.py
 !/tool/packages.py
+!/tool/reviews.py
 !/tool/requirements.txt
 !/tool/server.py
 !/tool/setup.py
@@ -34,10 +35,14 @@
 !/tool/tests/test_core.py
 !/tool/tests/test_server.py
 !/tool/tests/test_public_files.py
+!/tool/tests/test_storage_reviews.py
+!/tool/tests/test_ai_upgrade.py
 /tool/scripts/*
 !/tool/scripts/check_public_files.py
 
 # Defense in depth for private copies accidentally placed in source folders.
+/source/
+/review/
 **/.state/
 **/.venv/
 **/venv/

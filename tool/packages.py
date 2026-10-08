@@ -3,6 +3,7 @@ import math
 import os
 import re
 import tempfile
+import threading
 from pathlib import Path
 from captions import vtt
 
@@ -10,6 +11,7 @@ TOOL = Path(__file__).resolve().parent
 ROOT = TOOL.parent
 STATE = TOOL / ".state"
 STATE.mkdir(exist_ok=True)
+_LIBRARY_LOCK = threading.RLock()
 
 
 def atomic_json(path, data):
@@ -81,14 +83,60 @@ def save_package(folder, data):
     (folder / "bilingual.vtt").write_text(vtt(data["segments"], True), encoding="utf8")
 
 
+def library_root():
+    """Return the private media library without changing the project root."""
+    folder = safe_path(ROOT, "source")
+    if folder.exists() and not folder.is_dir():
+        raise ValueError("source 已存在且不是文件夹，请先处理后再启动")
+    return folder
+
+
+def _read_manifest(folder):
+    path = safe_path(folder, "manifest.json")
+    if path.stat().st_size > 30 * 1024 * 1024:
+        raise ValueError("素材包目录文件过大")
+    return validate(json.loads(path.read_text("utf8")), folder)
+
+
+def migrate_library():
+    """Move validated legacy packages once; preflight every move before writing."""
+    with _LIBRARY_LOCK:
+        destination = library_root()
+        moves = []
+        for folder in sorted(ROOT.iterdir()):
+            if folder.name.startswith(".") or folder.name in {"tool", "source", "review"} or folder.is_symlink() or not folder.is_dir():
+                continue
+            try:
+                safe_path(ROOT, folder.name)
+                _read_manifest(folder)
+            except (OSError, ValueError, TypeError, KeyError):
+                # Unrelated folders and incomplete downloads are never moved.
+                continue
+            if any(path.is_symlink() for path in folder.rglob("*")):
+                raise ValueError(f"素材包 {folder.name} 含有符号链接，未迁移任何素材包")
+            target = destination / folder.name
+            if target.exists() or target.is_symlink():
+                raise ValueError(f"source 中已存在同名素材包 {folder.name}，未迁移任何素材包；请先保留两份数据并解决重名")
+            moves.append((folder, target))
+        destination.mkdir(exist_ok=True)
+        for folder, target in moves:
+            if target.exists() or target.is_symlink():
+                raise ValueError(f"source 中已出现同名素材包 {folder.name}，迁移已停止，未覆盖文件")
+            folder.rename(target)
+        return [target.name for _, target in moves]
+
+
 def list_packages():
     result = []
-    for folder in sorted(ROOT.iterdir()):
+    library = library_root()
+    if not library.exists():
+        return result
+    for folder in sorted(library.iterdir()):
         if not folder.is_dir() or folder.name.startswith(".") or folder.name == "tool" or folder.is_symlink():
             continue
         try:
             data = read_package(folder.name)
-            result.append({k: data.get(k) for k in ("id", "title", "creator", "duration", "poster", "status", "created_at", "source_url", "caption_source", "notice") } | {"folder": folder.name, "count": len(data["segments"]), "analyzed": sum(bool(s.get("analysis")) for s in data["segments"])})
+            result.append({k: data.get(k) for k in ("id", "title", "creator", "duration", "poster", "status", "created_at", "source_url", "caption_source", "notice") } | {"folder": folder.name, "count": len(data["segments"]), "analyzed": sum(bool(s.get("analysis")) for s in data["segments"]), "detailed": sum(isinstance(s.get("analysis_version"), (int, float)) and not isinstance(s.get("analysis_version"), bool) and s["analysis_version"] >= 2 for s in data["segments"])})
         except (OSError, ValueError, TypeError, KeyError):
             continue
     return result
@@ -97,12 +145,8 @@ def list_packages():
 def package_folder(name):
     if not isinstance(name, str) or Path(name).name != name or name.startswith(".") or name == "tool":
         raise ValueError("素材包名称无效")
-    return safe_path(ROOT, name)
+    return safe_path(library_root(), name)
 
 
 def read_package(name):
-    folder = package_folder(name)
-    path = safe_path(folder, "manifest.json")
-    if path.stat().st_size > 30 * 1024 * 1024:
-        raise ValueError("素材包目录文件过大")
-    return validate(json.loads(path.read_text("utf8")), folder)
+    return _read_manifest(package_folder(name))

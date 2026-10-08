@@ -19,9 +19,9 @@ class ServerTests(unittest.TestCase):
         cls.root=Path(cls.temp.name)
         cls.patches=[patch.object(packages,'ROOT',cls.root),patch.object(server,'ROOT',cls.root),patch.object(server,'STATE',cls.root/'.state')]
         for p in cls.patches:p.start()
-        cls.folder=cls.root/'sample';cls.folder.mkdir()
+        cls.folder=cls.root/'source'/'sample';cls.folder.mkdir(parents=True)
         (cls.folder/'video.mp4').write_bytes(b'0123456789abcdefghijklmnopqrstuvwxyz')
-        cls.manifest={"schema_version":1,"id":"sample","title":"Sample","video":"video.mp4","segments":[{"id":"s1","start":0,"end":2,"en":"Hello."}]}
+        cls.manifest={"schema_version":1,"id":"sample","title":"Sample","video":"video.mp4","segments":[{"id":"s1","start":0,"end":2,"en":"Hello.","analysis":{"meaning":"A friendly greeting."}}]}
         packages.atomic_json(cls.folder/'manifest.json',cls.manifest)
         cls.http=server.ThreadingHTTPServer(('127.0.0.1',0),server.Handler)
         threading.Thread(target=cls.http.serve_forever,daemon=True).start()
@@ -69,12 +69,36 @@ class ServerTests(unittest.TestCase):
         status,_,_=self.request('POST',f'/api/import/file?id={start["id"]}&path=video.mp4',b'video bytes',{'X-Local-Token':server.TOKEN})
         self.assertEqual(status,200)
         status,_,raw=self.post('/api/import/finish',{'id':start['id']});self.assertEqual(status,200)
-        folder=json.loads(raw)['folder'];self.assertEqual((self.root/folder/'video.mp4').read_bytes(),b'video bytes')
+        folder=json.loads(raw)['folder'];self.assertEqual((self.root/'source'/folder/'video.mp4').read_bytes(),b'video bytes')
+        self.assertFalse((self.root/folder).exists())
         status,_,raw=self.post('/api/import/start',{'manifest':manifest});self.assertEqual(json.loads(raw)['existing'],folder)
 
     def test_import_missing_assets_cannot_finish(self):
         start=json.loads(self.post('/api/import/start',{'manifest':self.manifest|{'id':'missing'}})[2])
         self.assertEqual(self.post('/api/import/finish',{'id':start['id']})[0],400)
+
+    def test_review_roundtrip_and_same_origin_protection(self):
+        data={'folder':'sample','segment_id':'s1','selections':[{'field':'analysis.meaning','start':2,'end':10,'quote':'friendly'}]}
+        self.assertEqual(self.request('POST','/api/reviews/add',json.dumps(data))[0],403)
+        self.assertEqual(self.request('GET','/api/reviews',headers={'Origin':'https://example.com'})[0],403)
+        status,_,raw=self.post('/api/reviews/add',data)
+        self.assertEqual(status,200)
+        item=json.loads(raw)['item'];identifier=item['id']
+        self.assertEqual(item['source']['package_id'],'sample')
+        self.assertEqual(self.post('/api/reviews/update',{'id':identifier,'note':'My practice note','action':'reviewed'})[0],200)
+        saved=json.loads(self.request('GET','/api/reviews')[2])['items']
+        updated=next(row for row in saved if row['id']==identifier)
+        self.assertEqual(updated['note'],'My practice note')
+        self.assertEqual(updated['review_count'],1)
+        self.assertEqual(self.post('/api/reviews/delete',{'id':'../escape'})[0],400)
+        self.assertEqual(self.post('/api/reviews/delete',{'id':identifier})[0],200)
+
+    def test_analyze_upgrade_scope_passed_without_running_ai(self):
+        with patch.object(server.jobs,'launch',return_value={'status':'queued'}) as launch:
+            self.assertEqual(self.post('/api/analyze',{'folder':'sample','upgrade':True,'segment_id':'s1'})[0],202)
+            launch.assert_called_once_with('analysis',{'folder':'sample','upgrade':True,'segment_id':'s1'})
+            self.assertEqual(self.post('/api/analyze',{'folder':'sample','upgrade':'yes'})[0],400)
+            self.assertEqual(self.post('/api/analyze',{'folder':'sample','segment_id':'missing'})[0],400)
 
 
 if __name__=='__main__':unittest.main()

@@ -10,7 +10,7 @@ from check_public_files import audit_repository, check_blob
 
 class PublicationTests(unittest.TestCase):
     def test_personal_materials_and_symlinks_rejected(self):
-        for path in ("private-video/manifest.json", "tool/.state/jobs/task.json", "tool/.env"):
+        for path in ("private-video/manifest.json", "source/sample/manifest.json", "review/items/sample.json", "tool/.state/jobs/task.json", "tool/.env"):
             self.assertTrue(check_blob(path, "100644", b"{}"))
         self.assertTrue(check_blob("README.md", "120000", b"external-file"))
         self.assertTrue(check_blob("README.md", "100644", b"\0binary"))

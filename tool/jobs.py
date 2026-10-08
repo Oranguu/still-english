@@ -75,7 +75,7 @@ def launch(kind, details):
                 data = read_package(folder.name)
                 if not data["segments"]:
                     transcribe(folder, data, job)
-                ai.analyze(folder, data, job, run)
+                ai.analyze(folder, data, job, run, upgrade=details.get("upgrade", False), segment_id=details.get("segment_id"))
             job.check()
             job.update(status="complete", stage="done", progress=100, message="素材包已准备好，开始学习吧")
         except Cancelled:

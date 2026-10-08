@@ -21,8 +21,8 @@ const icons = {
 const icon = name => `<svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">${icons[name] || icons.book}</svg>`;
 const fmt = sec => {sec=Math.max(0,Math.floor(Number(sec)||0));return `${sec>=3600?Math.floor(sec/3600)+':':''}${String(Math.floor(sec/60)%60).padStart(2,'0')}:${String(sec%60).padStart(2,'0')}`;};
 const num = n => String(n).padStart(2,'0');
-const state = { token:'', packages:[], jobs:[], page:'library', pkg:null, progress:{}, current:0, mode:'watch', subtitles:'en', loop:false, analysisOpen:false, reveal:false, filter:'all', search:'', frame:0, loopTimer:0, saveTimer:0, jobSignature:'', loading:false };
-let toastTimer, saveRevision=0;
+const state = { token:'', packages:[], jobs:[], page:'library', route:null, pkg:null, progress:{}, current:0, mode:'watch', subtitles:'en', loop:false, analysisOpen:false, reveal:false, filter:'all', search:'', frame:0, loopTimer:0, saveTimer:0, jobSignature:'', loading:false, reviews:[], reviewFilter:'all', reviewSearch:'', reviewDrafts:{}, reviewDelete:null, selection:null, reviewSaving:false };
+let toastTimer, saveRevision=0, routeRevision=0, reviewRevision=0;
 function toast(message){$('#toast').textContent=message;$('#toast').classList.add('visible');clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('#toast').classList.remove('visible'),4000);}
 async function api(path, data, options={}){
   const response=await fetch(path,{...options,method:data!==undefined?'POST':options.method||'GET',headers:{...(data!==undefined?{'Content-Type':'application/json','X-Local-Token':state.token}:{}),...options.headers},body:data!==undefined?JSON.stringify(data):options.body});
@@ -33,8 +33,10 @@ async function api(path, data, options={}){
 const media = (pkg, path) => `/media/${encodeURIComponent(pkg.folder)}/${path.split('/').map(encodeURIComponent).join('/')}`;
 const current = () => state.pkg?.segments[state.current];
 function showImport(){ $('#download-error').textContent='';$('#import-dialog').showModal();setTimeout(()=>$('#video-url').focus(),30); }
-function teardown(){cancelAnimationFrame(state.frame);clearTimeout(state.loopTimer);const video=$('#video');if(video){video.pause();persist(true);} }
-async function home(){teardown();state.page='library';state.pkg=null;location.hash='';await loadLibrary();}
+async function teardown(){clearSelection();cancelAnimationFrame(state.frame);clearTimeout(state.loopTimer);const video=$('#video');if(video){video.pause();await persist(true);} }
+function setNavigation(page){$('#library-nav').classList.toggle('active',page!=='review');$('#review-nav').classList.toggle('active',page==='review');}
+function setRoute(route){state.route=route;const hash=route==='library'?'':route==='review'?'review':encodeURIComponent(route);if(location.hash.slice(1)!==hash)location.hash=hash;}
+async function home(){const revision=++routeRevision;setRoute('library');await teardown();if(revision!==routeRevision)return;state.page='library';state.pkg=null;setNavigation('library');await loadLibrary();}
 
 function jobCards(){
   return state.jobs.filter(j=>!['complete','cancelled'].includes(j.status)).slice(0,3).map(j=>{
@@ -51,24 +53,28 @@ async function loadLibrary(){
   }catch(e){toast(e.message);if(!state.packages.length)$('#app').innerHTML='<div class="empty">无法连接本地工具。请保持启动窗口打开，然后刷新页面。</div>';}
 }
 
-async function openPackage(folder){
-  if(state.loading)return;
-  state.loading=true;teardown();
+async function openPackage(folder, target=null){
+  const revision=++routeRevision;state.loading=true;setRoute(folder);await teardown();
   try{
-    const [pkg,progress]=await Promise.all([api(`/api/package?folder=${encodeURIComponent(folder)}`),api(`/api/progress?folder=${encodeURIComponent(folder)}`)]);
+    const [pkg,progress,reviews]=await Promise.all([api(`/api/package?folder=${encodeURIComponent(folder)}`),api(`/api/progress?folder=${encodeURIComponent(folder)}`),api('/api/reviews')]);
+    if(revision!==routeRevision)return;
+    if(target&&String(pkg.id)!==String(target.package_id))throw new Error('找到了同名素材，但它不是这条摘录的原视频。请重新导入原素材包。');
+    if(target&&!pkg.segments.some(s=>s.id===target.segment_id))throw new Error('原素材中的这句话已变更。摘录仍保存在复习库中。');
+    state.reviews=reviews.items;
     state.pkg=pkg;state.progress={favorites:[],mastered:[],notes:{},dictations:{},...progress};
     for(const key of ['favorites','mastered'])if(!Array.isArray(state.progress[key]))state.progress[key]=[];
     for(const key of ['notes','dictations'])if(!state.progress[key]||typeof state.progress[key]!=='object')state.progress[key]={};
     state.current=Math.max(0,pkg.segments.findIndex(s=>s.id===progress.lastSegment));
     state.mode=progress.mode==='focus'?'focus':'watch';state.subtitles=['none','en','both'].includes(progress.subtitles)?progress.subtitles:'en';
     state.loop=!!progress.loop;state.analysisOpen=false;state.reveal=false;state.filter='all';state.search='';state.page='study';
-    location.hash=encodeURIComponent(folder);renderStudy();
-  }catch(e){toast(e.message);}finally{state.loading=false;}
+    if(target){state.current=pkg.segments.findIndex(s=>s.id===target.segment_id);state.mode='focus';state.subtitles='both';state.analysisOpen=true;state.progress.lastTime=current().start;}
+    setNavigation('study');renderStudy();
+  }catch(e){if(revision===routeRevision){setRoute(state.page==='review'?'review':state.pkg?.folder||'library');toast(target?`暂时无法回到原句。${e.message}`:e.message);}}finally{if(revision===routeRevision)state.loading=false;}
 }
 
 function renderStudy(){
   const p=state.pkg;
-  $('#app').innerHTML=`<section class="study"><div class="study-top"><div class="breadcrumb"><button data-home>${icon('back')}素材库</button><span>/</span><span>学习空间</span></div><span id="save-status" class="saved-indicator">${icon('check')}进度自动保存</span></div><h1 class="study-title">${esc(p.title)}</h1><div class="study-meta"><span>${esc(p.creator)}</span><span>·</span><span>${fmt(p.duration)}</span><span>·</span><span>${p.segments.length} 个精听片段</span><span>·</span><span>${esc(p.caption_source||'英文字幕')}</span></div><div id="study-jobs"></div>${p.notice?`<div class="study-notice">${esc(p.notice)}</div>`:''}<div class="study-layout"><div class="study-main"><div class="mode-row"><div class="segmented" aria-label="播放模式"><button data-mode="watch">完整观看</button><button data-mode="focus" ${p.segments.length?'':'disabled'}>逐句精听</button></div><div class="subtitle-select"><span>字幕</span><div class="segmented" aria-label="字幕模式"><button data-sub="none">无字幕</button><button data-sub="en">英文</button><button data-sub="both">中英对照</button></div></div></div><div class="player-wrap" id="player-wrap"><video id="video" src="${media(p,p.video)}" ${p.poster?`poster="${media(p,p.poster)}"`:''} preload="metadata" playsinline aria-label="${esc(p.title)}"></video><div class="player-overlay" id="player-overlay"><button class="big-play" id="big-play" aria-label="播放视频">${icon('play')}</button></div><div class="video-subtitles" aria-live="off"><div class="en" id="sub-en"></div><div class="zh" id="sub-zh"></div></div><button class="fullscreen-exit" data-exit-fullscreen>退出全屏</button></div><div class="player-controls"><input class="timeline" id="timeline" type="range" min="0" max="${p.duration||1}" step="0.05" value="0" aria-label="视频播放进度"><div class="controls-row"><button class="icon-button" id="play-toggle" aria-label="播放">${icon('play')}</button><button class="icon-button" id="replay" aria-label="重听本句 (R)" title="重听本句 · R">${icon('replay')}</button><span class="timecode" id="timecode">00:00 / ${fmt(p.duration)}</span><div class="controls-right"><button class="loop-button" id="loop-toggle" aria-label="循环本句 (L)" title="循环本句 · L">${icon('repeat')}<span>循环</span></button><select id="rate" class="rate-select" aria-label="播放速度">${[.5,.75,.85,1,1.25,1.5].map(n=>`<option value="${n}">${n}×</option>`).join('')}</select><button class="icon-button" id="mute-toggle" aria-label="静音">${icon('sound')}</button><button class="icon-button" id="fullscreen" aria-label="全屏">${icon('expand')}</button></div></div></div><div class="focus-strip"><span id="focus-label">先听懂故事，再慢慢走进每一句。</span><div class="focus-keys"><button class="icon-button" id="prev" aria-label="上一句">${icon('back')}</button><kbd>←</kbd><span id="sentence-counter"></span><kbd>→</kbd><button class="icon-button" id="next" aria-label="下一句">${icon('next')}</button></div></div><div id="lesson"></div></div><aside class="transcript-panel"><div class="panel-header"><div class="panel-title"><h3>故事里的每一句</h3><small id="list-count">${p.segments.length} 个片段</small></div><div class="filter-tabs"><button class="active" data-filter="all">全部语句</button><button data-filter="favorites">已收藏</button><button data-filter="unlearned">待练习</button></div><div class="search-box">${icon('search')}<input id="sentence-search" placeholder="搜索语句或表达…" aria-label="搜索语句"></div></div><div class="sentence-list" id="sentence-list"></div><div class="progress-footer"><span id="mastery-count"></span><div class="mini-progress"><span id="mastery-bar"></span></div></div></aside></div></section>`;
+  $('#app').innerHTML=`<section class="study"><div class="study-top"><div class="breadcrumb"><button data-home>${icon('back')}素材库</button><span>/</span><span>学习空间</span></div><span id="save-status" class="saved-indicator">${icon('check')}进度自动保存</span></div><h1 class="study-title">${esc(p.title)}</h1><div class="study-meta"><span>${esc(p.creator)}</span><span>·</span><span>${fmt(p.duration)}</span><span>·</span><span>${p.segments.length} 个精听片段</span><span>·</span><span>${esc(p.caption_source||'英文字幕')}</span></div><div class="package-upgrade" id="package-upgrade">${packageUpgradeMarkup()}</div><div id="study-jobs"></div>${p.notice?`<div class="study-notice">${esc(p.notice)}</div>`:''}<div class="study-layout"><div class="study-main"><div class="mode-row"><div class="segmented" aria-label="播放模式"><button data-mode="watch">完整观看</button><button data-mode="focus" ${p.segments.length?'':'disabled'}>逐句精听</button></div><div class="subtitle-select"><span>字幕</span><div class="segmented" aria-label="字幕模式"><button data-sub="none">无字幕</button><button data-sub="en">英文</button><button data-sub="both">中英对照</button></div></div></div><div class="player-wrap" id="player-wrap"><video id="video" src="${media(p,p.video)}" ${p.poster?`poster="${media(p,p.poster)}"`:''} preload="metadata" playsinline aria-label="${esc(p.title)}"></video><div class="player-overlay" id="player-overlay"><button class="big-play" id="big-play" aria-label="播放视频">${icon('play')}</button></div><div class="video-subtitles" aria-live="off"><div class="en" id="sub-en"></div><div class="zh" id="sub-zh"></div></div><button class="fullscreen-exit" data-exit-fullscreen>退出全屏</button></div><div class="player-controls"><input class="timeline" id="timeline" type="range" min="0" max="${p.duration||1}" step="0.05" value="0" aria-label="视频播放进度"><div class="controls-row"><button class="icon-button" id="play-toggle" aria-label="播放">${icon('play')}</button><button class="icon-button" id="replay" aria-label="重听本句 (R)" title="重听本句 · R">${icon('replay')}</button><span class="timecode" id="timecode">00:00 / ${fmt(p.duration)}</span><div class="controls-right"><button class="loop-button" id="loop-toggle" aria-label="循环本句 (L)" title="循环本句 · L">${icon('repeat')}<span>循环</span></button><select id="rate" class="rate-select" aria-label="播放速度">${[.5,.75,.85,1,1.25,1.5].map(n=>`<option value="${n}">${n}×</option>`).join('')}</select><button class="icon-button" id="mute-toggle" aria-label="静音">${icon('sound')}</button><button class="icon-button" id="fullscreen" aria-label="全屏">${icon('expand')}</button></div></div></div><div class="focus-strip"><span id="focus-label">先听懂故事，再慢慢走进每一句。</span><div class="focus-keys"><button class="icon-button" id="prev" aria-label="上一句">${icon('back')}</button><kbd>←</kbd><span id="sentence-counter"></span><kbd>→</kbd><button class="icon-button" id="next" aria-label="下一句">${icon('next')}</button></div></div><div id="lesson"></div></div><aside class="transcript-panel"><div class="panel-header"><div class="panel-title"><h3>故事里的每一句</h3><small id="list-count">${p.segments.length} 个片段</small></div><div class="filter-tabs"><button class="active" data-filter="all">全部语句</button><button data-filter="favorites">已收藏</button><button data-filter="unlearned">待练习</button></div><div class="search-box">${icon('search')}<input id="sentence-search" placeholder="搜索语句或表达…" aria-label="搜索语句"></div></div><div class="sentence-list" id="sentence-list"></div><div class="progress-footer"><span id="mastery-count"></span><div class="mini-progress"><span id="mastery-bar"></span></div></div></aside></div></section>`;
   const video=$('#video');video.playbackRate=[.5,.75,.85,1,1.25,1.5].includes(state.progress.rate)?state.progress.rate:1;$('#rate').value=video.playbackRate;
   video.addEventListener('loadedmetadata',()=>{
     $('#timeline').max=video.duration;
@@ -155,20 +161,136 @@ function highlightCurrent(){
 function updateMastery(){const n=state.pkg.segments.filter(s=>state.progress.mastered.includes(s.id)).length;$('#mastery-count').textContent=`已掌握 ${n} / ${state.pkg.segments.length} 句`;$('#mastery-bar').style.width=`${n/Math.max(1,state.pkg.segments.length)*100}%`;}
 
 function renderLesson(){
-  const s=current();if(!$('#lesson'))return;
+  const s=current();if(!$('#lesson'))return;clearSelection();
   if(!s){$('#lesson').innerHTML=`<div class="analysis-empty">视频已经可以完整播放。添加英文字幕后，就能解锁逐句精听与讲解。<br><button class="button" data-caption>导入英文字幕</button> <button class="button" data-analyze>识别语音并生成讲解</button><p class="fine-print">本地识别需先运行 tool/安装语音转写.command；首次运行会下载语音模型。</p></div>`;return;}
   const visible=state.subtitles!=='none'||state.reveal, favorite=state.progress.favorites.includes(s.id),mastered=state.progress.mastered.includes(s.id);
   $('#lesson').innerHTML=`<div class="lesson-top"><div class="eyebrow">ONE SENTENCE AT A TIME / ${num(state.current+1)}</div><div class="lesson-actions"><button data-favorite aria-pressed="${favorite}">${icon('star')}${favorite?'已收藏':'收藏'}</button><button data-mastered aria-pressed="${mastered}">${icon('check')}${mastered?'已掌握':'标记掌握'}</button></div></div>${visible?`<p class="current-quote">${esc(s.en)}</p>${state.subtitles==='both'||state.reveal?`<p class="current-translation">${esc(s.zh||'中文翻译尚未生成，可在下方补全讲解。')}</p>`:''}`:`<div class="blind-prompt"><h3>先让耳朵，找到答案。</h3><p>反复听这一句，试着抓住几个熟悉的词。不着急。</p><button class="button small" data-reveal>准备好了，查看原文</button></div>`}<details class="dictation" ${state.progress.dictations[s.id]?'open':''}><summary>${icon('pen')}写下我听到的 · 听写练习</summary><textarea id="dictation" placeholder="Type what you hear…" aria-label="本句听写" spellcheck="false">${esc(state.progress.dictations[s.id]||'')}</textarea><div class="dictation-bottom"><button class="button small" data-check-dictation>对照答案</button><span id="dictation-result"></span></div><p class="fine-print" id="dictation-answer" hidden></p></details><button class="analysis-toggle" id="analysis-toggle" aria-expanded="${state.analysisOpen}"><span>把这一句，听明白<span class="tag">词句讲解</span></span>${icon('chevron')}</button><div id="analysis-content" class="analysis-content" ${state.analysisOpen?'':'hidden'}>${analysisMarkup(s)}</div><label class="note-label" for="personal-note">留给自己的笔记 <span>· 自动保存</span></label><textarea class="personal-note" id="personal-note" placeholder="记下一点发现，或写一个自己的句子…">${esc(state.progress.notes[s.id]||'')}</textarea>`;
   $('#dictation').oninput=e=>{state.progress.dictations[s.id]=e.target.value;persist();};
   $('#personal-note').oninput=e=>{state.progress.notes[s.id]=e.target.value;persist();};
-  $('#analysis-toggle').onclick=()=>{state.analysisOpen=!state.analysisOpen;$('#analysis-toggle').setAttribute('aria-expanded',state.analysisOpen);$('#analysis-content').hidden=!state.analysisOpen;};
+  $('#analysis-toggle').onclick=()=>{state.analysisOpen=!state.analysisOpen;$('#analysis-toggle').setAttribute('aria-expanded',state.analysisOpen);$('#analysis-content').hidden=!state.analysisOpen;if(!state.analysisOpen)clearSelection();};
+  applyHighlights();
+}
+function packageUpgradeMarkup(){
+  const pending=state.pkg.segments.filter(s=>s.analysis&&s.analysis_version!==2).length;
+  return pending?`<span>把熟悉的句子，再拆细一点。</span><button class="button small" data-upgrade-package>升级本素材精讲 · ${pending} 句</button><small>逐句补充基础单词、短语和句子拆解，会使用 Codex 用量。</small>`:'';
 }
 function analysisMarkup(s){
   const a=s.analysis;
-  if(!a)return `<div class="analysis-empty">这句话的讲解还没有生成。准备好后，就能查看翻译、表达用法和听音提示。<br><button class="button primary small" data-analyze>补全 AI 讲解</button><p class="fine-print">使用当前 ChatGPT 账号的 Codex 用量，只补充尚未完成的语句。</p></div>`;
-  const group=(name,title,rows,key,body)=>Array.isArray(rows)&&rows.length?`<section class="analysis-section"><h3 class="section-label">${icon(name)}${title}</h3>${rows.map(row=>`<div class="analysis-item"><strong>${esc(row[key])}</strong>${body(row)}</div>`).join('')}</section>`:'';
-  return `<div class="meaning"><span class="meaning-title">The meaning, simply.</span>${esc(a.meaning)}${s.zh?`<div style="margin-top:9px;color:#92977f;font-size:11px">${esc(s.zh)}</div>`:''}</div><div class="analysis-columns"><div>${group('book','把表达装进口袋',a.vocabulary,'term',r=>`${esc(r.meaning)}<div class="example">${esc(r.example)}</div>`)}</div><div>${group('lines','句子是怎样组成的',a.grammar,'pattern',r=>esc(r.explanation))}${group('sound','耳朵可以留意的细节',a.speech,'text',r=>esc(r.tip))}<p class="speech-note">发音提示基于常见语言规律生成，具体读法请对照原音。</p></div></div>${a.paraphrase?`<div class="practice-card"><small>IN OTHER WORDS</small>${esc(a.paraphrase)}</div>`:''}${a.practice?`<div class="practice-card"><small>YOUR TURN / 换你来说</small>${esc(a.practice)}</div>`:''}`;
+  if(!a)return `<div class="analysis-empty">这句话的讲解还没有生成。准备好后，就能从基础单词开始，一小步一小步理解它。<br><button class="button primary small" data-analyze>生成细致讲解</button><p class="fine-print">使用当前 ChatGPT 账号的 Codex 用量，只补充尚未完成的语句。</p></div>`;
+  const leaf=(field,text,tag='span',className='')=>`<${tag} class="review-text ${className}" data-review-field="${esc(field)}">${esc(text)}</${tag}>`;
+  const save=(fields)=>`<button class="save-fragment" data-save-fields="${esc(fields.join(','))}" aria-label="将这一条讲解保存到复习库">${icon('pen')}保存这一条</button>`;
+  const group=(name,title,key,fields)=>Array.isArray(a[key])&&a[key].length?`<section class="analysis-section"><h3 class="section-label">${icon(name)}${title}<span>${a[key].length}</span></h3>${a[key].map((row,index)=>{const paths=fields.map(([field])=>`analysis.${key}.${index}.${field}`);return `<article class="analysis-item">${fields.map(([field,tag,className])=>leaf(`analysis.${key}.${index}.${field}`,row[field],tag,className)).join('')}${save(paths)}</article>`;}).join('')}</section>`:'';
+  return `<div class="analysis-toolbar"><div><span class="level-tag">${s.analysis_version===2?'从零开始 · 一点点学':'已有讲解'}</span><p>划选想记住的文字，再保存到复习库。也可用每条下方的保存按钮。</p></div><button class="button small" data-save-selection disabled>${icon('pen')}保存划选内容</button></div>${s.analysis_version!==2?`<div class="upgrade-note"><span>想把每个小词都弄明白？可以升级为更细的入门讲解。</span><button class="button small" data-upgrade-sentence>升级这一句精讲</button></div>`:''}<div class="meaning"><span class="meaning-title">先懂这句话在说什么</span>${leaf('analysis.meaning',a.meaning,'div')}${save(['analysis.meaning'])}</div>${group('lines','一句一句拆开','sentence_parts',[['chunk','strong',''],['meaning','p',''],['role','p','part-role']])}<div class="analysis-columns"><div>${group('book','基础单词 · 小词也学会','vocabulary',[['term','strong',''],['meaning','p',''],['example','p','example']])}${group('link','常用短语 · 放在一起记','phrases',[['term','strong',''],['meaning','p',''],['example','p','example']])}</div><div>${group('lines','句子怎么组成','grammar',[['pattern','strong',''],['explanation','p','']])}${group('sound','耳朵可以留意的细节','speech',[['text','strong',''],['tip','p','']])}<p class="speech-note">发音提示基于常见语言规律生成，具体读法请对照原音。</p></div></div>${a.paraphrase?`<div class="practice-card"><small>换个简单的说法</small>${leaf('analysis.paraphrase',a.paraphrase,'div')}${save(['analysis.paraphrase'])}</div>`:''}${a.practice?`<div class="practice-card"><small>换你来说 · 小小练习</small>${leaf('analysis.practice',a.practice,'div')}${save(['analysis.practice'])}</div>`:''}`;
 }
+
+function clearSelection(){state.selection=null;$('#selection-toolbar').hidden=true;document.querySelectorAll('[data-save-selection]').forEach(b=>b.disabled=true);}
+function showSelection(selections,rect){
+  if(!selections.length){clearSelection();return;}
+  if(selections.length>30||selections.reduce((n,s)=>n+Array.from(s.quote).length,0)+selections.length-1>12000){clearSelection();toast('这次划选有点长，请分成更小的几段保存。');return;}
+  state.selection={folder:state.pkg.folder,segment_id:current().id,selections};
+  document.querySelectorAll('[data-save-selection]').forEach(b=>b.disabled=false);
+  const toolbar=$('#selection-toolbar');toolbar.hidden=false;
+  const width=toolbar.offsetWidth;toolbar.style.left=`${Math.max(12,Math.min(rect.left+(rect.width-width)/2,innerWidth-width-12))}px`;
+  toolbar.style.top=`${Math.max(12,Math.min(rect.bottom+9,innerHeight-toolbar.offsetHeight-12))}px`;
+}
+function captureSelection(){
+  if(state.page!=='study'||!state.analysisOpen||state.reviewSaving)return;
+  const selection=window.getSelection(),content=$('#analysis-content');
+  if(!selection?.rangeCount||selection.isCollapsed){if(!document.activeElement?.closest('[data-save-selection]'))clearSelection();return;}
+  const range=selection.getRangeAt(0);
+  if(!content?.contains(range.startContainer)||!content.contains(range.endContainer)){clearSelection();return;}
+  const selections=[];
+  for(const leaf of content.querySelectorAll('[data-review-field]')){
+    if(!range.intersectsNode(leaf))continue;
+    const part=document.createRange();part.selectNodeContents(leaf);
+    if(leaf.contains(range.startContainer))part.setStart(range.startContainer,range.startOffset);
+    if(leaf.contains(range.endContainer))part.setEnd(range.endContainer,range.endOffset);
+    const quote=part.toString();if(!quote.trim())continue;
+    const prefix=document.createRange();prefix.selectNodeContents(leaf);prefix.setEnd(part.startContainer,part.startOffset);
+    const start=Array.from(prefix.toString()).length;
+    selections.push({field:leaf.dataset.reviewField,start,end:start+Array.from(quote).length,quote});
+  }
+  showSelection(selections,range.getBoundingClientRect());
+}
+function fullSelections(fields){
+  const leaves=[...document.querySelectorAll('#analysis-content [data-review-field]')];
+  return fields.map(field=>{const quote=leaves.find(node=>node.dataset.reviewField===field)?.textContent||'';return {field,start:0,end:Array.from(quote).length,quote};}).filter(s=>s.quote.trim());
+}
+async function saveSelection(payload=state.selection){
+  if(!payload?.selections.length){toast('先在讲解中划选文字，或点击某条讲解下方的保存按钮。');return;}
+  if(state.reviewSaving)return;
+  state.reviewSaving=true;
+  try{
+    const result=await api('/api/reviews/add',payload);
+    reviewRevision++;
+    state.reviews=[result.item,...state.reviews.filter(item=>item.id!==result.item.id)];
+    clearSelection();window.getSelection()?.removeAllRanges();applyHighlights();
+    if(state.page==='review')renderReviewList();
+    toast(result.existing?'这段已经在复习库里了':'已保存到复习库，慢慢复习就好。');
+  }finally{state.reviewSaving=false;}
+}
+function applyHighlights(){
+  if(!state.pkg||!current())return;
+  const items=state.reviews.filter(item=>String(item.source.package_id)===String(state.pkg.id)&&item.source.segment_id===current().id);
+  for(const leaf of document.querySelectorAll('#analysis-content [data-review-field]')){
+    const value=leaf.textContent,chars=Array.from(value),ranges=[];
+    for(const item of items)for(const selection of item.selections||[]){
+      if(selection.field===leaf.dataset.reviewField&&selection.context===value&&Number.isInteger(selection.start)&&Number.isInteger(selection.end)&&selection.start>=0&&selection.end>selection.start&&selection.end<=chars.length&&chars.slice(selection.start,selection.end).join('')===selection.quote)ranges.push([selection.start,selection.end]);
+    }
+    ranges.sort((a,b)=>a[0]-b[0]);const merged=[];
+    for(const range of ranges){const last=merged.at(-1);if(last&&range[0]<=last[1])last[1]=Math.max(last[1],range[1]);else merged.push([...range]);}
+    let cursor=0,markup='';
+    for(const [start,end] of merged){markup+=esc(chars.slice(cursor,start).join(''))+`<mark class="review-highlight" title="已保存到复习库">${esc(chars.slice(start,end).join(''))}</mark>`;cursor=end;}
+    leaf.innerHTML=markup+esc(chars.slice(cursor).join(''));
+  }
+}
+document.addEventListener('selectionchange',()=>{if(!state.reviewSaving)captureSelection();});
+document.addEventListener('pointerup',e=>{if(!e.target.closest('[data-save-selection]'))captureSelection();});
+document.addEventListener('pointerdown',e=>{if(e.target.closest('[data-save-selection]'))e.preventDefault();});
+window.addEventListener('resize',()=>{if(state.selection)captureSelection();});
+document.addEventListener('scroll',()=>{if(state.selection)captureSelection();},true);
+
+const reviewDate=value=>{if(!value)return '还没有复习';const date=new Date(value);return Number.isNaN(date.getTime())?'':date.toLocaleDateString('zh-CN',{month:'long',day:'numeric'});};
+async function openReviews(){
+  const revision=++routeRevision;setRoute('review');await teardown();if(revision!==routeRevision)return;
+  state.page='review';state.pkg=null;state.reviewDelete=null;setNavigation('review');
+  $('#app').innerHTML='<div class="loading"><span class="spinner"></span>正在翻开你的复习库…</div>';
+  try{
+    let result,before;
+    do{before=reviewRevision;result=await api('/api/reviews');if(revision!==routeRevision)return;}while(before!==reviewRevision);
+    state.reviews=result.items;renderReviews();
+  }
+  catch(e){if(revision===routeRevision){$('#app').innerHTML='<div class="empty">暂时无法打开复习库。<br><button class="button small" data-review-refresh>重新加载</button></div>';toast(e.message);}}
+}
+function renderReviews(){
+  $('#app').innerHTML=`<section class="review-page"><div class="review-heading"><div><div class="eyebrow">A LITTLE TO KEEP, A LITTLE TO REVISIT.</div><h1>让记住的，<em>留得久一点。</em></h1><p>从精讲里划下的每一点，都在这里。今天，再和它们见一面。</p></div><div class="review-total"><strong>${num(state.reviews.length)}</strong><span>份小小的积累</span></div></div><div class="review-tools"><div class="filter-tabs review-filters" aria-label="复习状态"><button data-review-filter="all">全部摘录</button><button data-review-filter="unmastered">继续练习</button><button data-review-filter="mastered">已经掌握</button></div><div class="search-box review-search">${icon('search')}<input id="review-search" type="search" value="${esc(state.reviewSearch)}" placeholder="找一个词、一条笔记或一个故事…" aria-label="搜索复习摘录、笔记和来源"></div><button class="text-button" data-review-refresh aria-label="刷新复习库">${icon('replay')}</button></div><div id="review-summary" class="review-summary" aria-live="polite"></div><div id="review-list" class="review-list"></div><p class="library-note">${icon('folder')}摘录与笔记保存在本地 review 文件夹。即使原视频暂时不在，也能继续复习。</p></section>`;
+  $('#review-search').oninput=e=>{state.reviewSearch=e.target.value;renderReviewList();};renderReviewList();
+}
+function renderReviewList(){
+  if(state.page!=='review'||!$('#review-list'))return;
+  $('.review-total strong').textContent=num(state.reviews.length);
+  const query=state.reviewSearch.trim().toLocaleLowerCase();
+  const items=state.reviews.filter(item=>(state.reviewFilter!=='unmastered'||!item.mastered)&&(state.reviewFilter!=='mastered'||item.mastered)&&(!query||[item.quote,item.note,state.reviewDrafts[item.id],item.source.package_title,item.source.en,item.source.zh].join(' ').toLocaleLowerCase().includes(query)));
+  document.querySelectorAll('[data-review-filter]').forEach(b=>{const active=b.dataset.reviewFilter===state.reviewFilter;b.classList.toggle('active',active);b.setAttribute('aria-pressed',String(active));});
+  $('#review-summary').textContent=`${items.length} 条摘录 · ${state.reviews.filter(item=>item.mastered).length} 条已掌握`;
+  $('#review-list').innerHTML=items.length?items.map(item=>{
+    const src=item.source,note=Object.prototype.hasOwnProperty.call(state.reviewDrafts,item.id)?state.reviewDrafts[item.id]:item.note||'';
+    const contexts=(item.selections||[]).filter((s,i,arr)=>arr.findIndex(row=>row.field===s.field)===i);
+    return `<article class="review-card ${item.mastered?'is-mastered':''}" data-review-card="${esc(item.id)}"><div class="review-card-top"><span class="review-source-title">${esc(src.package_title)}</span><span class="review-status">${item.mastered?icon('check')+' 已掌握':'慢慢记住'}</span></div><blockquote>${esc(item.quote)}</blockquote>${contexts.length?`<details class="review-context"><summary>看看摘录前后的讲解</summary>${contexts.map(s=>`<p>${esc(s.context)}</p>`).join('')}</details>`:''}<details class="review-source"><summary>来自故事里的这一句 · ${fmt(src.start)}</summary><p lang="en">${esc(src.en)}</p><p class="muted">${esc(src.zh)}</p><button class="text-button" data-review-source="${esc(item.id)}">${icon('play')}回到原视频这一句</button></details><label class="note-label" for="review-note-${esc(item.id)}">用自己的话记一记</label><textarea class="personal-note review-note" id="review-note-${esc(item.id)}" data-review-note="${esc(item.id)}" placeholder="这个词让我想到什么？下次想怎么用？" maxlength="10000">${esc(note)}</textarea><div class="review-note-actions"><button class="text-button" data-review-save-note="${esc(item.id)}">保存笔记</button><span class="review-note-status" data-note-status="${esc(item.id)}" aria-live="polite">${note!==(item.note||'')?'笔记尚未保存':''}</span></div><div class="review-card-footer"><span>复习 ${Number(item.review_count)||0} 次 · ${item.last_reviewed_at?'上次 '+reviewDate(item.last_reviewed_at):'第一次，从今天开始'}</span><div class="review-actions"><button class="button small" data-review-studied="${esc(item.id)}">今天复习过了</button><button class="button small" aria-pressed="${!!item.mastered}" data-review-mastered="${esc(item.id)}">${icon('check')}${item.mastered?'继续练习':'标记掌握'}</button><button class="text-button review-remove" data-review-remove="${esc(item.id)}">移除</button></div></div>${state.reviewDelete===item.id?`<div class="review-delete-confirm" role="alert"><span>移除这条摘录和它的笔记？原素材会保留。</span><button class="button small" data-review-keep="${esc(item.id)}">保留</button><button class="button small danger" data-review-delete="${esc(item.id)}">确认移除</button></div>`:''}</article>`;
+  }).join(''):`<div class="review-empty"><span class="review-empty-mark">“</span><h2>${state.reviews.length?'暂时没有这样的摘录':'喜欢的一句，值得再见。'}</h2><p>${state.reviews.length?'换个关键词，或看看其他复习状态。':'打开视频的词句讲解，划选想记住的单词、短语或解释，保存到这里。'}</p><button class="button small" ${state.reviews.length?'data-review-reset':'data-home'}>${state.reviews.length?'查看全部摘录':'去素材库听一听'}</button></div>`;
+}
+function updateReviewItem(item){reviewRevision++;state.reviews=state.reviews.map(old=>old.id===item.id?item:old);renderReviewList();}
+async function reviewAction(id,change,message){const result=await api('/api/reviews/update',{id,...change});updateReviewItem(result.item);toast(message);}
+async function jumpToReviewSource(item){
+  const revision=routeRevision,result=await api('/api/packages');
+  if(revision!==routeRevision||state.page!=='review')return;
+  const matches=result.packages.filter(pkg=>String(pkg.id)===String(item.source.package_id));
+  const original=matches.find(pkg=>pkg.folder===item.source.folder)||matches[0];
+  if(!original){toast('原素材暂时不在素材库。重新导入这个视频的素材包后，就能回到原句；摘录仍然可以复习。');return;}
+  await openPackage(original.folder,item.source);
+}
+document.addEventListener('input',e=>{const id=e.target.dataset?.reviewNote;if(!id)return;state.reviewDrafts[id]=e.target.value;const status=[...document.querySelectorAll('[data-note-status]')].find(node=>node.dataset.noteStatus===id);if(status)status.textContent='笔记尚未保存';});
+
 function mark(kind){const id=current().id,arr=state.progress[kind];state.progress[kind]=arr.includes(id)?arr.filter(x=>x!==id):[...arr,id];renderLesson();renderList();updateMastery();persist();}
 function checkDictation(){
   const answer=current().en,user=$('#dictation').value;
@@ -188,7 +310,7 @@ function persist(immediate=false){
   const payload={folder:state.pkg.folder,progress:structuredClone(state.progress)},revision=++saveRevision;
   clearTimeout(state.saveTimer);
   const save=async()=>{try{await api('/api/progress',payload);if(revision===saveRevision&&$('#save-status')){$('#save-status').innerHTML=`${icon('check')}进度已保存`;$('#save-status').classList.remove('progress-error');}}catch(e){if($('#save-status')){$('#save-status').textContent='进度保存失败';$('#save-status').classList.add('progress-error');}}};
-  if(immediate)save();else state.saveTimer=setTimeout(save,650);
+  if(immediate)return save();else state.saveTimer=setTimeout(save,650);
 }
 setInterval(()=>{if(state.page==='study'&&$('#video')&&!$('#video').paused)persist();},5000);
 document.addEventListener('visibilitychange',()=>{if(document.hidden)persist(true);});
@@ -204,19 +326,21 @@ async function pollJobs(){
       if(state.page==='library'){
         if($('#jobs-area'))$('#jobs-area').innerHTML=jobCards();
         if(before&&state.jobs.some(j=>j.status==='complete'))await loadLibrary();
-      }else if(state.pkg){
+      }else if(state.page==='study'&&state.pkg){
+        const folder=state.pkg.folder;
         const matching=state.jobs.find(j=>j.folder===state.pkg.folder&&['running','queued'].includes(j.status));
         if($('#study-jobs'))$('#study-jobs').innerHTML=matching?`<div class="study-notice">${esc(matching.message)} · 可以先练习已经准备好的语句。</div>`:'';
-        const updated=await api(`/api/package?folder=${encodeURIComponent(state.pkg.folder)}`);
-        const changed=updated.segments.length!==state.pkg.segments.length||updated.segments.filter(s=>s.analysis).length!==state.pkg.segments.filter(s=>s.analysis).length;
+        const updated=await api(`/api/package?folder=${encodeURIComponent(folder)}`);
+        if(state.page!=='study'||state.pkg?.folder!==folder)return;
+        const changed=JSON.stringify(updated.segments)!==JSON.stringify(state.pkg.segments);
         if(changed){
-          const oldId=current()?.id, countChanged=updated.segments.length!==state.pkg.segments.length;
+          const oldId=current()?.id, oldSentence=JSON.stringify(current()), countChanged=updated.segments.length!==state.pkg.segments.length;
           state.progress.lastTime=$('#video')?.currentTime||0;
           state.pkg={...updated,folder:state.pkg.folder};state.current=Math.max(0,state.pkg.segments.findIndex(s=>s.id===oldId));
           if(countChanged)renderStudy();
           else{
-            if($('#analysis-content')&&current())$('#analysis-content').innerHTML=analysisMarkup(current());
-            if($('.current-translation'))$('.current-translation').textContent=current()?.zh||'中文翻译尚未生成，可在下方补全讲解。';
+            if(JSON.stringify(current())!==oldSentence)renderLesson();
+            if($('#package-upgrade'))$('#package-upgrade').innerHTML=packageUpgradeMarkup();
             renderList();
           }
         }
@@ -271,7 +395,8 @@ $('#download-form').onsubmit=async e=>{
   e.preventDefault();const button=e.target.querySelector('[type=submit]');button.disabled=true;$('#download-error').textContent='';
   try{await api('/api/download',{url:$('#video-url').value.trim(),analyze:$('#auto-ai').checked,browser:$('#cookie-browser').value});$('#import-dialog').close();await home();await pollJobs();toast('已开始准备素材包，可以在这里查看进度');}catch(e){$('#download-error').textContent=e.message;}finally{button.disabled=false;}
 };
-$('#home').onclick=home;$('#library-nav').onclick=home;$('#guide-nav').onclick=()=>$('#guide-dialog').showModal();
+$('#home').onclick=home;$('#library-nav').onclick=home;$('#review-nav').onclick=openReviews;$('#guide-nav').onclick=()=>$('#guide-dialog').showModal();
+async function analyze(button,options={}){button.disabled=true;try{await api('/api/analyze',{folder:state.pkg.folder,...options});toast(options.upgrade?'正在升级详细精讲，可以先继续学习':'正在补全未完成的讲解');await pollJobs();}finally{button.disabled=false;}}
 document.addEventListener('click',async e=>{
   const b=e.target.closest('button');if(!b)return;
   try{
@@ -289,16 +414,31 @@ document.addEventListener('click',async e=>{
     else if(b.hasAttribute('data-mastered'))mark('mastered');
     else if(b.hasAttribute('data-check-dictation'))checkDictation();
     else if(b.hasAttribute('data-caption'))$('#caption-input').click();
-    else if(b.hasAttribute('data-analyze')){await api('/api/analyze',{folder:state.pkg.folder});toast('正在补全未完成的讲解');await pollJobs();}
+    else if(b.hasAttribute('data-analyze'))await analyze(b);
+    else if(b.hasAttribute('data-upgrade-sentence'))await analyze(b,{upgrade:true,segment_id:current().id});
+    else if(b.hasAttribute('data-upgrade-package'))await analyze(b,{upgrade:true});
+    else if(b.hasAttribute('data-save-selection'))await saveSelection();
+    else if(b.dataset.saveFields)await saveSelection({folder:state.pkg.folder,segment_id:current().id,selections:fullSelections(b.dataset.saveFields.split(','))});
+    else if(b.hasAttribute('data-review-refresh'))await openReviews();
+    else if(b.dataset.reviewFilter){state.reviewFilter=b.dataset.reviewFilter;state.reviewDelete=null;renderReviewList();}
+    else if(b.hasAttribute('data-review-reset')){state.reviewFilter='all';state.reviewSearch='';renderReviews();}
+    else if(b.dataset.reviewSaveNote){const id=b.dataset.reviewSaveNote,note=state.reviewDrafts[id]??state.reviews.find(item=>item.id===id)?.note??'';b.disabled=true;try{const result=await api('/api/reviews/update',{id,note});if(state.reviewDrafts[id]===note)delete state.reviewDrafts[id];updateReviewItem(result.item);toast(Object.prototype.hasOwnProperty.call(state.reviewDrafts,id)?'笔记已保存，刚刚的新修改仍可继续保存':'笔记已保存');}finally{b.disabled=false;}}
+    else if(b.dataset.reviewStudied){b.disabled=true;try{await reviewAction(b.dataset.reviewStudied,{action:'reviewed'},'又见面了一次，记忆会慢慢变牢。');}finally{b.disabled=false;}}
+    else if(b.dataset.reviewMastered){const item=state.reviews.find(item=>item.id===b.dataset.reviewMastered);await reviewAction(item.id,{mastered:!item.mastered},item.mastered?'已放回继续练习':'已标记掌握');}
+    else if(b.dataset.reviewRemove){state.reviewDelete=b.dataset.reviewRemove;renderReviewList();}
+    else if(b.dataset.reviewKeep){state.reviewDelete=null;renderReviewList();}
+    else if(b.dataset.reviewDelete){const id=b.dataset.reviewDelete;b.disabled=true;try{await api('/api/reviews/delete',{id});reviewRevision++;state.reviews=state.reviews.filter(item=>item.id!==id);delete state.reviewDrafts[id];state.reviewDelete=null;renderReviewList();toast('摘录已移除');}finally{b.disabled=false;}}
+    else if(b.dataset.reviewSource){const item=state.reviews.find(item=>item.id===b.dataset.reviewSource);b.disabled=true;try{if(item)await jumpToReviewSource(item);}finally{b.disabled=false;}}
     else if(b.dataset.cancel){await api('/api/cancel',{id:b.dataset.cancel});await pollJobs();}
     else if(b.dataset.dismiss){dismissed.add(b.dataset.dismiss);await pollJobs();if($('#jobs-area'))$('#jobs-area').innerHTML=jobCards();}
-    else if(b.dataset.retry){const j=state.jobs.find(x=>x.id===b.dataset.retry);if(j.folder&&(j.kind==='analysis'||['analysis','transcribe'].includes(j.stage)))await api('/api/analyze',{folder:j.folder});else await api('/api/download',{url:j.url,analyze:j.analyze,browser:j.browser});dismissed.add(j.id);await pollJobs();}
+    else if(b.dataset.retry){const j=state.jobs.find(x=>x.id===b.dataset.retry);if(j.folder&&(j.kind==='analysis'||['analysis','transcribe'].includes(j.stage)))await api('/api/analyze',{folder:j.folder,upgrade:j.upgrade,segment_id:j.segment_id});else await api('/api/download',{url:j.url,analyze:j.analyze,browser:j.browser});dismissed.add(j.id);await pollJobs();}
     else if(b.hasAttribute('data-exit-fullscreen'))document.exitFullscreen();
   }catch(err){toast(err.message);}
 });
 document.addEventListener('keydown',e=>{
+  if(e.key==='Escape')clearSelection();
   if(state.page!=='study'||document.querySelector('dialog[open]')||e.ctrlKey||e.metaKey||e.altKey||e.target.closest('input,textarea,select,[contenteditable]'))return;
-  if(e.code==='Space'&&e.target.closest('button'))return;
+  if(e.target.closest('button,summary')||window.getSelection()?.toString())return;
   if(e.code==='Space'){e.preventDefault();togglePlay();}
   if(e.code==='ArrowLeft'){e.preventDefault();selectSentence(state.current-1);}
   if(e.code==='ArrowRight'){e.preventDefault();selectSentence(state.current+1);}
@@ -307,7 +447,13 @@ document.addEventListener('keydown',e=>{
 
 async function boot(){
   try{const status=await api('/api/status');state.token=status.token;$('#connection').innerHTML=`<span class="status-dot" style="${status.ai.ready?'':'background:#bda06e'}"></span>${status.ai.ready?'ChatGPT 已连接 · 本地学习':'本地学习空间'}`;$('#connection').title=status.ai.message;
-    await pollJobs();const folder=decodeURIComponent(location.hash.slice(1));if(folder)await openPackage(folder);else await loadLibrary();setInterval(pollJobs,3000);
+    await pollJobs();await routeFromHash();setInterval(pollJobs,3000);
   }catch(e){$('#app').innerHTML='<div class="empty">本地服务尚未启动。请双击 tool/启动.command，然后重新打开此页面。</div>';}
 }
+async function routeFromHash(){
+  let route;try{route=decodeURIComponent(location.hash.slice(1))||'library';}catch{route='library';}
+  if(route===state.route)return;
+  if(route==='review')await openReviews();else if(route==='library')await home();else await openPackage(route);
+}
+window.addEventListener('hashchange',()=>{if(state.token)routeFromHash();});
 boot();

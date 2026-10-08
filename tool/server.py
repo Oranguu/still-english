@@ -16,8 +16,9 @@ from urllib.parse import unquote, urlparse, parse_qs, quote
 
 import ai
 import jobs
+import reviews
 from captions import read_cues, segment_cues
-from packages import TOOL, ROOT, STATE, atomic_json, safe_path, validate, list_packages, read_package, package_folder, save_package
+from packages import TOOL, ROOT, STATE, atomic_json, safe_path, validate, list_packages, read_package, package_folder, save_package, library_root, migrate_library
 
 TOKEN = secrets.token_urlsafe(32)
 IMPORTS = {}
@@ -88,11 +89,13 @@ class Handler(BaseHTTPRequestHandler):
             path = unquote(parsed.path)
             query = parse_qs(parsed.query)
             if path == "/api/status":
-                return self.reply({"token": TOKEN, "ai": ai.auth_status(), "root": str(ROOT), "version": "1.0.0", "transcription": bool(jobs.importlib.util.find_spec("faster_whisper"))})
+                return self.reply({"token": TOKEN, "ai": ai.auth_status(), "root": str(ROOT), "version": "1.1.0", "transcription": bool(jobs.importlib.util.find_spec("faster_whisper"))})
             if path == "/api/packages":
                 return self.reply({"packages": list_packages()})
             if path == "/api/jobs":
                 return self.reply({"jobs": jobs.snapshots()})
+            if path == "/api/reviews":
+                return self.reply({"items": reviews.list_reviews()})
             if path == "/api/package":
                 folder = query.get("folder", [""])[0]
                 data = read_package(folder)
@@ -149,6 +152,12 @@ class Handler(BaseHTTPRequestHandler):
             data = json.loads(self.body() or b"{}")
             if not isinstance(data, dict):
                 raise ValueError("请求格式无效")
+            if path == "/api/reviews/add":
+                return self.reply(reviews.add_review(data))
+            if path == "/api/reviews/update":
+                return self.reply(reviews.update_review(data))
+            if path == "/api/reviews/delete":
+                return self.reply(reviews.delete_review(data))
             if path == "/api/download":
                 details = {"url": jobs.normalize_url(data.get("url", "")), "browser": data.get("browser", ""), "analyze": data.get("analyze", True) is True}
                 if details["browser"] not in ("", "chrome", "safari", "edge", "firefox"):
@@ -156,8 +165,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(jobs.launch("download", details), 202)
             if path == "/api/analyze":
                 folder = data.get("folder", "")
-                read_package(folder)
-                return self.reply(jobs.launch("analysis", {"folder": folder}), 202)
+                package = read_package(folder)
+                upgrade = data.get("upgrade", False)
+                segment_id = data.get("segment_id")
+                if not isinstance(upgrade, bool):
+                    raise ValueError("请选择是否升级精讲")
+                if segment_id is not None and (not isinstance(segment_id, str) or not any(s["id"] == segment_id for s in package["segments"])):
+                    raise ValueError("找不到要升级的语句")
+                return self.reply(jobs.launch("analysis", {"folder": folder, "upgrade": upgrade, "segment_id": segment_id}), 202)
             if path == "/api/cancel":
                 jobs.cancel(data.get("id"))
                 return self.reply({"ok": True})
@@ -189,7 +204,9 @@ class Handler(BaseHTTPRequestHandler):
                 folder, manifest = item["folder"], item["manifest"]
                 validate(manifest, folder)
                 save_package(folder, manifest)
-                dest = ROOT / f'imported-{manifest["id"]}-{data["id"][:6]}'
+                dest = package_folder(f'imported-{manifest["id"]}-{data["id"][:6]}')
+                if dest.exists():
+                    raise ValueError("目标素材包已存在，请重新导入")
                 folder.rename(dest)
                 del IMPORTS[data["id"]]
                 return self.reply({"folder": dest.name})
@@ -273,10 +290,14 @@ def main():
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--no-browser", action="store_true")
     args = parser.parse_args()
+    migrated = migrate_library()
+    reviews.list_reviews()
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     server.daemon_threads = True
     url = f"http://127.0.0.1:{server.server_port}"
-    print(f"\n  Still · 慢慢听\n  {url}\n  素材包目录：{ROOT}\n  关闭此窗口即可停止工具。\n", flush=True)
+    print(f"\n  Still · 慢慢听\n  {url}\n  素材包目录：{library_root()}\n  复习库目录：{ROOT / 'review'}\n  关闭此窗口即可停止工具。\n", flush=True)
+    if migrated:
+        print(f"  已将 {len(migrated)} 个原有素材包整理到 source，学习进度保持不变。", flush=True)
     if not args.no_browser:
         threading.Timer(.6, lambda: webbrowser.open(url)).start()
     def interrupt(signum, frame):

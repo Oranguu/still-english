@@ -1,6 +1,5 @@
 """Loopback-only local application, with streaming media and portable folder imports."""
 import argparse
-import hashlib
 import json
 import mimetypes
 import os
@@ -26,8 +25,7 @@ STATIC = TOOL / "static"
 
 
 def progress_path(folder):
-    data = read_package(folder)
-    return STATE / "progress" / f'{hashlib.sha256(data["id"].encode()).hexdigest()[:24]}.json'
+    return reviews.progress_path(folder, STATE)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -89,20 +87,19 @@ class Handler(BaseHTTPRequestHandler):
             path = unquote(parsed.path)
             query = parse_qs(parsed.query)
             if path == "/api/status":
-                return self.reply({"token": TOKEN, "ai": ai.auth_status(), "root": str(ROOT), "version": "1.1.0", "transcription": bool(jobs.importlib.util.find_spec("faster_whisper"))})
+                return self.reply({"token": TOKEN, "ai": ai.auth_status(), "root": str(ROOT), "version": "1.2.0", "transcription": bool(jobs.importlib.util.find_spec("faster_whisper"))})
             if path == "/api/packages":
                 return self.reply({"packages": list_packages()})
             if path == "/api/jobs":
                 return self.reply({"jobs": jobs.snapshots()})
             if path == "/api/reviews":
-                return self.reply({"items": reviews.list_reviews()})
+                return self.reply({"items": reviews.list_reviews(STATE)})
             if path == "/api/package":
                 folder = query.get("folder", [""])[0]
                 data = read_package(folder)
                 return self.reply(data | {"folder": folder})
             if path == "/api/progress":
-                file = progress_path(query.get("folder", [""])[0])
-                return self.reply(json.loads(file.read_text()) if file.exists() else {})
+                return self.reply(reviews.read_progress(query.get("folder", [""])[0], STATE))
             if path.startswith("/media/"):
                 parts = path[len("/media/"):].split("/", 1)
                 if len(parts) != 2:
@@ -157,7 +154,7 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/reviews/update":
                 return self.reply(reviews.update_review(data))
             if path == "/api/reviews/delete":
-                return self.reply(reviews.delete_review(data))
+                return self.reply(reviews.delete_review(data, STATE))
             if path == "/api/download":
                 details = {"url": jobs.normalize_url(data.get("url", "")), "browser": data.get("browser", ""), "analyze": data.get("analyze", True) is True}
                 if details["browser"] not in ("", "chrome", "safari", "edge", "firefox"):
@@ -179,10 +176,7 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/progress":
                 folder = data.get("folder", "")
                 progress = data.get("progress", {})
-                if not isinstance(progress, dict):
-                    raise ValueError("进度格式无效")
-                atomic_json(progress_path(folder), progress)
-                return self.reply({"ok": True})
+                return self.reply(reviews.save_progress(folder, progress, STATE))
             if path == "/api/import/start":
                 manifest = validate(data.get("manifest"))
                 for existing in list_packages():
@@ -291,7 +285,7 @@ def main():
     parser.add_argument("--no-browser", action="store_true")
     args = parser.parse_args()
     migrated = migrate_library()
-    reviews.list_reviews()
+    reviews.list_reviews(STATE)
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     server.daemon_threads = True
     url = f"http://127.0.0.1:{server.server_port}"

@@ -62,6 +62,32 @@ class ServerTests(unittest.TestCase):
         result=json.loads(self.request('GET','/api/progress?folder=sample')[2])
         self.assertEqual(result,data['progress'])
 
+    def test_favorites_join_reviews_and_review_delete_updates_only_favorites(self):
+        progress={'favorites':['s1'],'notes':{'s1':'Initial sentence note'},'lastTime':1.6,'dictation':{'s1':'hello'}}
+        self.assertEqual(self.post('/api/progress',{'folder':'sample','progress':progress})[0],200)
+        rows=json.loads(self.request('GET','/api/reviews')[2])['items']
+        favorite=next(row for row in rows if row['kind']=='favorite' and row['source']['package_id']=='sample')
+        self.assertEqual((favorite['category'],favorite['english'],favorite['selections']),('sentence','Hello.',[]))
+        self.assertEqual(self.post('/api/reviews/update',{'id':favorite['id'],'category':'word'})[0],400)
+        self.assertEqual(self.post('/api/reviews/update',{'id':favorite['id'],'note':'My own review note','action':'reviewed'})[0],200)
+        self.assertEqual(self.post('/api/reviews/delete',{'id':favorite['id']})[0],200)
+        self.assertEqual(json.loads(self.request('GET','/api/progress?folder=sample')[2]),progress|{'favorites':[]})
+        self.assertFalse(any(row['id']==favorite['id'] for row in json.loads(self.request('GET','/api/reviews')[2])['items']))
+        self.assertEqual(self.post('/api/progress',{'folder':'sample','progress':progress})[0],200)
+        restored=next(row for row in json.loads(self.request('GET','/api/reviews')[2])['items'] if row['id']==favorite['id'])
+        self.assertEqual((restored['note'],restored['review_count']),('My own review note',1))
+
+    def test_progress_api_rejects_symlink_targets(self):
+        with tempfile.TemporaryDirectory(dir=self.root) as temp:
+            state=Path(temp)
+            target=state/'private.json';target.write_text('{"secret":"untouched"}')
+            with patch.object(server,'STATE',state):
+                path=server.progress_path('sample');path.parent.mkdir()
+                path.symlink_to(target)
+                self.assertEqual(self.request('GET','/api/progress?folder=sample')[0],400)
+                self.assertEqual(self.post('/api/progress',{'folder':'sample','progress':{'favorites':[]}})[0],400)
+                self.assertEqual(target.read_text(),'{"secret":"untouched"}')
+
     def test_streamed_folder_import_and_duplicate(self):
         manifest=self.manifest|{'id':'new-sample'}
         status,_,raw=self.post('/api/import/start',{'manifest':manifest});self.assertEqual(status,200)
@@ -85,11 +111,12 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(status,200)
         item=json.loads(raw)['item'];identifier=item['id']
         self.assertEqual(item['source']['package_id'],'sample')
-        self.assertEqual(self.post('/api/reviews/update',{'id':identifier,'note':'My practice note','action':'reviewed'})[0],200)
+        self.assertEqual(self.post('/api/reviews/update',{'id':identifier,'note':'My practice note','action':'reviewed','category':'word'})[0],200)
         saved=json.loads(self.request('GET','/api/reviews')[2])['items']
         updated=next(row for row in saved if row['id']==identifier)
         self.assertEqual(updated['note'],'My practice note')
         self.assertEqual(updated['review_count'],1)
+        self.assertEqual(updated['category'],'word')
         self.assertEqual(self.post('/api/reviews/delete',{'id':'../escape'})[0],400)
         self.assertEqual(self.post('/api/reviews/delete',{'id':identifier})[0],200)
 

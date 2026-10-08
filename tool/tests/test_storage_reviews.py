@@ -245,5 +245,165 @@ class ReviewTests(StorageFixture):
             self.assertEqual(copy_path.read_bytes(), original)
 
 
+class FavoriteCategoryTests(StorageFixture):
+    def setUp(self):
+        super().setUp()
+        self.folder = self.package(parent=self.root / "source")
+        self.data = example()
+        analysis = self.data["segments"][0]["analysis"]
+        analysis["vocabulary"].append({"term": "give up", "meaning": "放弃", "example": "Do not give up. 别放弃。"})
+        analysis["phrases"] = [{"term": "a little", "meaning": "一点点", "example": "I need a little help. 我需要一点帮助。"}]
+        analysis["sentence_parts"] = [{"chunk": "I can", "meaning": "我能够", "role": "谁能做"}]
+        packages.atomic_json(self.folder / "manifest.json", self.data)
+
+    def excerpt(self, *fields):
+        selections = []
+        for field in fields:
+            text = reviews._field_context(self.data["segments"][0], field)
+            selections.append({"field": field, "start": 0, "end": len(text), "quote": text})
+        return reviews.add_review({"folder": "lesson", "segment_id": "s1", "selections": selections})["item"]
+
+    def favorites(self):
+        return [item for item in reviews.list_reviews() if item["kind"] == "favorite"]
+
+    def test_category_and_english_summary_cover_words_phrases_examples_and_mixed(self):
+        cases = [
+            (("analysis.vocabulary.0.meaning",), "word", "can"),
+            (("analysis.vocabulary.1.meaning",), "phrase", "give up"),
+            (("analysis.vocabulary.0.example",), "sentence", "I can run."),
+            (("analysis.phrases.0.meaning",), "phrase", "a little"),
+            (("analysis.phrases.0.example",), "sentence", "I need a little help."),
+            (("analysis.sentence_parts.0.meaning",), "sentence", "I can"),
+            (("analysis.meaning",), "sentence", "I can jump."),
+            (("analysis.vocabulary.0.term", "analysis.vocabulary.1.term"), "sentence", "can\ngive up"),
+        ]
+        for fields, category, english in cases:
+            with self.subTest(fields=fields):
+                item = self.excerpt(*fields)
+                self.assertEqual((item["kind"], item["category"], item["active"], item["english"]), ("excerpt", category, True, english))
+        item = self.excerpt("analysis.vocabulary.0.meaning")
+        updated = reviews.update_review({"id": item["id"], "category": "phrase"})["item"]
+        self.assertEqual(updated["category"], "phrase")
+        self.assertEqual(self.excerpt("analysis.vocabulary.0.meaning")["category"], "phrase")
+        for invalid in ([], None, "unknown", 1):
+            with self.assertRaises(ValueError):
+                reviews.update_review({"id": item["id"], "category": invalid})
+
+    def test_legacy_defaults_and_backfill_leave_existing_excerpt_bytes_unchanged(self):
+        item = self.excerpt("analysis.vocabulary.1.meaning")
+        for key in ("kind", "category", "active", "english"):
+            item.pop(key)
+        path = self.root / "review" / "items" / (item["id"] + ".json")
+        packages.atomic_json(path, item)
+        before = path.read_bytes()
+        packages.atomic_json(reviews.progress_path("lesson"), {"favorites": ["s1"], "notes": {"s1": "原有句子笔记"}})
+        rows = reviews.list_reviews()
+        legacy = next(row for row in rows if row["id"] == item["id"])
+        self.assertEqual((legacy["kind"], legacy["category"], legacy["english"], legacy["active"]), ("excerpt", "phrase", "give up", True))
+        self.assertEqual(path.read_bytes(), before)
+        favorite = next(row for row in rows if row["kind"] == "favorite")
+        self.assertEqual((favorite["category"], favorite["english"], favorite["selections"], favorite["note"]), ("sentence", "I can jump.", [], "原有句子笔记"))
+        self.assertEqual(self.favorites()[0]["id"], favorite["id"])
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_legacy_english_never_uses_changed_context_and_new_summaries_survive_source_loss(self):
+        fresh = self.excerpt("analysis.phrases.0.meaning")
+        legacy = self.excerpt("analysis.vocabulary.1.meaning")
+        for key in ("kind", "category", "active", "english"):
+            legacy.pop(key)
+        path = self.root / "review" / "items" / (legacy["id"] + ".json")
+        packages.atomic_json(path, legacy)
+        self.data["segments"][0]["analysis"]["vocabulary"][1].update(term="stand up", meaning="站起来")
+        packages.atomic_json(self.folder / "manifest.json", self.data)
+        derived = next(row for row in reviews.list_reviews() if row["id"] == legacy["id"])
+        self.assertEqual(derived["english"], "I can jump.")
+        shutil.rmtree(self.folder)
+        self.assertEqual(next(row for row in reviews.list_reviews() if row["id"] == fresh["id"])["english"], "a little")
+
+    def test_favorite_remove_restore_preserves_snapshot_notes_and_review_history(self):
+        reviews.save_progress("lesson", {"favorites": ["s1"], "notes": {"s1": "initial"}, "lastTime": 1.5})
+        original = self.favorites()[0]
+        reviews.update_review({"id": original["id"], "note": "review note", "mastered": True, "action": "reviewed"})
+        reviews.save_progress("lesson", {"favorites": [], "notes": {"s1": "changed"}, "lastTime": 2})
+        self.assertEqual(self.favorites(), [])
+        self.assertTrue((self.root / "review" / "items" / (original["id"] + ".json")).is_file())
+        self.data["segments"][0].update(en="New subtitles.", zh="新字幕。")
+        packages.atomic_json(self.folder / "manifest.json", self.data)
+        reviews.save_progress("lesson", {"favorites": ["s1"], "notes": {"s1": "changed again"}})
+        restored = self.favorites()[0]
+        self.assertEqual(restored["id"], original["id"])
+        self.assertEqual(restored["source"], original["source"])
+        self.assertEqual((restored["note"], restored["review_count"], restored["mastered"]), ("review note", 1, True))
+        with self.assertRaises(ValueError):
+            reviews.update_review({"id": restored["id"], "category": "word"})
+
+    def test_favorite_and_excerpt_delete_are_independent_and_preserve_other_progress(self):
+        progress = {"favorites": ["s1", "another"], "lastTime": 1.8, "notes": {"s1": "old"}, "dictation": {"s1": "my attempt"}}
+        reviews.save_progress("lesson", progress)
+        excerpt = self.excerpt("analysis.meaning")
+        favorite = self.favorites()[0]
+        reviews.delete_review({"id": excerpt["id"]})
+        self.assertEqual(reviews.read_progress("lesson"), progress)
+        excerpt = self.excerpt("analysis.meaning")
+        reviews.delete_review({"id": favorite["id"]})
+        self.assertEqual(reviews.read_progress("lesson"), progress | {"favorites": ["another"]})
+        self.assertEqual([row["id"] for row in reviews.list_reviews()], [excerpt["id"]])
+        reviews.save_progress("lesson", progress)
+        self.assertEqual(self.favorites()[0]["id"], favorite["id"])
+
+    def test_missing_or_corrupt_progress_and_missing_material_never_remove_favorite(self):
+        reviews.save_progress("lesson", {"favorites": ["s1"]})
+        original = self.favorites()[0]
+        path = reviews.progress_path("lesson")
+        path.unlink()
+        self.assertEqual(self.favorites(), [original])
+        path.write_text("not JSON")
+        with self.assertLogs(level="WARNING"):
+            self.assertEqual(self.favorites(), [original])
+        with self.assertRaises(ValueError):
+            reviews.save_progress("lesson", {"favorites": []})
+        self.assertEqual(path.read_text(), "not JSON")
+        packages.atomic_json(path, {"lastTime": 2})
+        self.assertEqual(self.favorites(), [original])
+        packages.atomic_json(path, {"favorites": []})
+        shutil.rmtree(self.folder)
+        self.assertEqual(self.favorites(), [original])
+        reviews.delete_review({"id": original["id"]})
+        self.assertEqual(self.favorites(), [])
+
+    def test_missing_favorites_key_preserves_prior_selection_and_repeated_sync_is_idempotent(self):
+        reviews.save_progress("lesson", {"favorites": ["s1"]})
+        original = self.favorites()[0]
+        reviews.save_progress("lesson", {"lastTime": 2.2})
+        self.assertEqual(reviews.read_progress("lesson"), {"favorites": ["s1"], "lastTime": 2.2})
+        for _ in range(3):
+            reviews.sync_favorites()
+        self.assertEqual(self.favorites(), [original])
+        self.assertEqual(len(list((self.root / "review" / "items").glob("*.json"))), 1)
+
+    def test_progress_symlinks_at_state_directory_progress_directory_or_file_are_rejected(self):
+        with tempfile.TemporaryDirectory() as elsewhere:
+            external = Path(elsewhere)
+            (self.root / "tool").symlink_to(external, target_is_directory=True)
+            with self.assertRaises(ValueError):
+                reviews.save_progress("lesson", {"favorites": ["s1"]})
+            (self.root / "tool").unlink()
+            state = self.root / "state-test"
+            state.mkdir()
+            (state / "progress").symlink_to(external, target_is_directory=True)
+            with self.assertRaises(ValueError):
+                reviews.read_progress("lesson", state)
+            (state / "progress").unlink()
+            (state / "progress").mkdir()
+            target = external / "private.json"
+            target.write_text('{"private":"untouched"}')
+            path = reviews.progress_path("lesson", state)
+            path.symlink_to(target)
+            for action in (lambda: reviews.read_progress("lesson", state), lambda: reviews.save_progress("lesson", {"favorites": []}, state)):
+                with self.assertRaises(ValueError):
+                    action()
+            self.assertEqual(target.read_text(), '{"private":"untouched"}')
+
+
 if __name__ == "__main__":
     unittest.main()

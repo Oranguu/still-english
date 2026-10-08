@@ -21,8 +21,8 @@ const icons = {
 const icon = name => `<svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">${icons[name] || icons.book}</svg>`;
 const fmt = sec => {sec=Math.max(0,Math.floor(Number(sec)||0));return `${sec>=3600?Math.floor(sec/3600)+':':''}${String(Math.floor(sec/60)%60).padStart(2,'0')}:${String(sec%60).padStart(2,'0')}`;};
 const num = n => String(n).padStart(2,'0');
-const state = { token:'', packages:[], jobs:[], page:'library', route:null, pkg:null, progress:{}, current:0, mode:'watch', subtitles:'en', loop:false, analysisOpen:false, reveal:false, filter:'all', search:'', frame:0, loopTimer:0, saveTimer:0, jobSignature:'', loading:false, reviews:[], reviewFilter:'all', reviewSearch:'', reviewDrafts:{}, reviewDelete:null, selection:null, reviewSaving:false };
-let toastTimer, saveRevision=0, routeRevision=0, reviewRevision=0;
+const state = { token:'', packages:[], jobs:[], page:'library', route:null, pkg:null, progress:{}, current:0, mode:'watch', subtitles:'en', loop:false, analysisOpen:false, reveal:false, filter:'all', search:'', frame:0, loopTimer:0, saveTimer:0, jobSignature:'', loading:false, reviews:[], reviewFilter:'all', reviewCategory:'all', reviewSearch:'', reviewExpanded:new Set(), reviewDrafts:{}, reviewDelete:null, selection:null, reviewSaving:false };
+let toastTimer, saveRevision=0, routeRevision=0, reviewRevision=0, progressQueue=Promise.resolve(true), teardownPending=null;
 function toast(message){$('#toast').textContent=message;$('#toast').classList.add('visible');clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('#toast').classList.remove('visible'),4000);}
 async function api(path, data, options={}){
   const response=await fetch(path,{...options,method:data!==undefined?'POST':options.method||'GET',headers:{...(data!==undefined?{'Content-Type':'application/json','X-Local-Token':state.token}:{}),...options.headers},body:data!==undefined?JSON.stringify(data):options.body});
@@ -33,10 +33,18 @@ async function api(path, data, options={}){
 const media = (pkg, path) => `/media/${encodeURIComponent(pkg.folder)}/${path.split('/').map(encodeURIComponent).join('/')}`;
 const current = () => state.pkg?.segments[state.current];
 function showImport(){ $('#download-error').textContent='';$('#import-dialog').showModal();setTimeout(()=>$('#video-url').focus(),30); }
-async function teardown(){clearSelection();cancelAnimationFrame(state.frame);clearTimeout(state.loopTimer);const video=$('#video');if(video){video.pause();await persist(true);} }
+async function teardown(){
+  if(teardownPending)return teardownPending;
+  clearSelection();cancelAnimationFrame(state.frame);clearTimeout(state.loopTimer);
+  const video=$('#video');if(!video)return true;
+  video.pause();
+  teardownPending=(async()=>{let revision;do{const pending=persist(true);revision=saveRevision;if(!await pending)return false;}while(revision!==saveRevision);return true;})();
+  try{return await teardownPending;}finally{teardownPending=null;}
+}
+function keepUnsavedStudy(){setRoute(state.pkg?.folder||'library');toast('学习进度还没有保存成功，已留在当前页面。请恢复本地连接后再试，收藏和笔记暂时保留在这里。');}
 function setNavigation(page){$('#library-nav').classList.toggle('active',page!=='review');$('#review-nav').classList.toggle('active',page==='review');}
 function setRoute(route){state.route=route;const hash=route==='library'?'':route==='review'?'review':encodeURIComponent(route);if(location.hash.slice(1)!==hash)location.hash=hash;}
-async function home(){const revision=++routeRevision;setRoute('library');await teardown();if(revision!==routeRevision)return;state.page='library';state.pkg=null;setNavigation('library');await loadLibrary();}
+async function home(){const revision=++routeRevision;setRoute('library');const saved=await teardown();if(revision!==routeRevision)return;if(!saved){keepUnsavedStudy();return;}state.page='library';state.pkg=null;setNavigation('library');await loadLibrary();}
 
 function jobCards(){
   return state.jobs.filter(j=>!['complete','cancelled'].includes(j.status)).slice(0,3).map(j=>{
@@ -54,7 +62,9 @@ async function loadLibrary(){
 }
 
 async function openPackage(folder, target=null){
-  const revision=++routeRevision;state.loading=true;setRoute(folder);await teardown();
+  const revision=++routeRevision;state.loading=true;setRoute(folder);const saved=await teardown();
+  if(revision!==routeRevision)return;
+  if(!saved){state.loading=false;keepUnsavedStudy();return;}
   try{
     const [pkg,progress,reviews]=await Promise.all([api(`/api/package?folder=${encodeURIComponent(folder)}`),api(`/api/progress?folder=${encodeURIComponent(folder)}`),api('/api/reviews')]);
     if(revision!==routeRevision)return;
@@ -231,7 +241,7 @@ async function saveSelection(payload=state.selection){
 }
 function applyHighlights(){
   if(!state.pkg||!current())return;
-  const items=state.reviews.filter(item=>String(item.source.package_id)===String(state.pkg.id)&&item.source.segment_id===current().id);
+  const items=state.reviews.filter(item=>item.active!==false&&String(item.source.package_id)===String(state.pkg.id)&&item.source.segment_id===current().id);
   for(const leaf of document.querySelectorAll('#analysis-content [data-review-field]')){
     const value=leaf.textContent,chars=Array.from(value),ranges=[];
     for(const item of items)for(const selection of item.selections||[]){
@@ -251,8 +261,21 @@ window.addEventListener('resize',()=>{if(state.selection)captureSelection();});
 document.addEventListener('scroll',()=>{if(state.selection)captureSelection();},true);
 
 const reviewDate=value=>{if(!value)return '还没有复习';const date=new Date(value);return Number.isNaN(date.getTime())?'':date.toLocaleDateString('zh-CN',{month:'long',day:'numeric'});};
+const reviewCategories={word:'单词',phrase:'短语',sentence:'句子'};
+const reviewCategory=item=>item.kind==='favorite'?'sentence':Object.hasOwn(reviewCategories,item.category)?item.category:'sentence';
+function reviewEnglish(item){
+  const english=text=>(String(text||'').match(/[\p{Script=Latin}\p{N}][\p{Script=Latin}\p{N}\s'’"“”.,!?;:()\/+&\-–—…]*/gu)||[]).map(part=>part.trim().replace(/^[.,;:!?\s]+|[;:,\s]+$/g,'')).filter(part=>/\p{Script=Latin}/u.test(part)).join(' · ');
+  if(item.kind==='favorite')return english(item.source.en)||'…';
+  if(english(item.english))return english(item.english);
+  const selected=(item.selections||[]).map(selection=>({field:selection.field,text:english(selection.quote)})).filter(selection=>selection.text);
+  const terms=selected.filter(selection=>/\.(?:term|chunk|pattern|text)$/.test(selection.field));
+  const texts=(terms.length?terms:selected).map(selection=>selection.text);
+  return [...new Set(texts)].join(' · ')||english(item.source.en)||'…';
+}
 async function openReviews(){
-  const revision=++routeRevision;setRoute('review');await teardown();if(revision!==routeRevision)return;
+  const fresh=state.page!=='review',revision=++routeRevision;setRoute('review');const saved=await teardown();if(revision!==routeRevision)return;
+  if(!saved){keepUnsavedStudy();return;}
+  if(fresh)state.reviewExpanded.clear();
   state.page='review';state.pkg=null;state.reviewDelete=null;setNavigation('review');
   $('#app').innerHTML='<div class="loading"><span class="spinner"></span>正在翻开你的复习库…</div>';
   try{
@@ -263,22 +286,27 @@ async function openReviews(){
   catch(e){if(revision===routeRevision){$('#app').innerHTML='<div class="empty">暂时无法打开复习库。<br><button class="button small" data-review-refresh>重新加载</button></div>';toast(e.message);}}
 }
 function renderReviews(){
-  $('#app').innerHTML=`<section class="review-page"><div class="review-heading"><div><div class="eyebrow">A LITTLE TO KEEP, A LITTLE TO REVISIT.</div><h1>让记住的，<em>留得久一点。</em></h1><p>从精讲里划下的每一点，都在这里。今天，再和它们见一面。</p></div><div class="review-total"><strong>${num(state.reviews.length)}</strong><span>份小小的积累</span></div></div><div class="review-tools"><div class="filter-tabs review-filters" aria-label="复习状态"><button data-review-filter="all">全部摘录</button><button data-review-filter="unmastered">继续练习</button><button data-review-filter="mastered">已经掌握</button></div><div class="search-box review-search">${icon('search')}<input id="review-search" type="search" value="${esc(state.reviewSearch)}" placeholder="找一个词、一条笔记或一个故事…" aria-label="搜索复习摘录、笔记和来源"></div><button class="text-button" data-review-refresh aria-label="刷新复习库">${icon('replay')}</button></div><div id="review-summary" class="review-summary" aria-live="polite"></div><div id="review-list" class="review-list"></div><p class="library-note">${icon('folder')}摘录与笔记保存在本地 review 文件夹。即使原视频暂时不在，也能继续复习。</p></section>`;
+  $('#app').innerHTML=`<section class="review-page"><div class="review-heading"><div><div class="eyebrow">A LITTLE TO KEEP, A LITTLE TO REVISIT.</div><h1>让记住的，<em>留得久一点。</em></h1><p>划下的表达、收藏的句子，都在这里。先看英语想一想，再点开慢慢复习。</p></div><div class="review-total"><strong>${num(state.reviews.filter(item=>item.active!==false).length)}</strong><span>份小小的积累</span></div></div><div class="review-category-bar"><div class="segmented review-categories" aria-label="复习内容分类"><button data-review-category="all">全部内容</button>${Object.entries(reviewCategories).map(([value,label])=>`<button data-review-category="${value}">${label}</button>`).join('')}</div></div><div class="review-tools"><div class="filter-tabs review-filters" aria-label="复习状态"><button data-review-filter="all">全部状态</button><button data-review-filter="unmastered">继续练习</button><button data-review-filter="mastered">已经掌握</button></div><div class="search-box review-search">${icon('search')}<input id="review-search" type="search" value="${esc(state.reviewSearch)}" placeholder="找一个词、一条笔记或一个故事…" aria-label="搜索复习内容、笔记和来源"></div><button class="text-button" data-review-refresh aria-label="刷新复习库">${icon('replay')}</button></div><div id="review-summary" class="review-summary" aria-live="polite"></div><div id="review-list" class="review-list"></div><p class="library-note">${icon('folder')}收藏、摘录与笔记保存在本地 review 文件夹。即使原视频暂时不在，也能继续复习。</p></section>`;
   $('#review-search').oninput=e=>{state.reviewSearch=e.target.value;renderReviewList();};renderReviewList();
 }
 function renderReviewList(){
   if(state.page!=='review'||!$('#review-list'))return;
-  $('.review-total strong').textContent=num(state.reviews.length);
+  document.querySelectorAll('[data-review-card]').forEach(card=>{if(card.open)state.reviewExpanded.add(card.dataset.reviewCard);else state.reviewExpanded.delete(card.dataset.reviewCard);});
+  const all=state.reviews.filter(item=>item.active!==false);
+  $('.review-total strong').textContent=num(all.length);
   const query=state.reviewSearch.trim().toLocaleLowerCase();
-  const items=state.reviews.filter(item=>(state.reviewFilter!=='unmastered'||!item.mastered)&&(state.reviewFilter!=='mastered'||item.mastered)&&(!query||[item.quote,item.note,state.reviewDrafts[item.id],item.source.package_title,item.source.en,item.source.zh].join(' ').toLocaleLowerCase().includes(query)));
+  const items=all.filter(item=>(state.reviewFilter!=='unmastered'||!item.mastered)&&(state.reviewFilter!=='mastered'||item.mastered)&&(state.reviewCategory==='all'||reviewCategory(item)===state.reviewCategory)&&(!query||[reviewEnglish(item),item.quote,item.note,state.reviewDrafts[item.id],item.source.package_title,item.source.en,item.source.zh].join(' ').toLocaleLowerCase().includes(query)));
   document.querySelectorAll('[data-review-filter]').forEach(b=>{const active=b.dataset.reviewFilter===state.reviewFilter;b.classList.toggle('active',active);b.setAttribute('aria-pressed',String(active));});
-  $('#review-summary').textContent=`${items.length} 条摘录 · ${state.reviews.filter(item=>item.mastered).length} 条已掌握`;
+  document.querySelectorAll('[data-review-category]').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.reviewCategory===state.reviewCategory)));
+  $('#review-summary').textContent=`${items.length} 条内容 · ${all.filter(item=>item.mastered).length} 条已掌握`;
   $('#review-list').innerHTML=items.length?items.map(item=>{
-    const src=item.source,note=Object.prototype.hasOwnProperty.call(state.reviewDrafts,item.id)?state.reviewDrafts[item.id]:item.note||'';
+    const src=item.source,favorite=item.kind==='favorite',note=Object.hasOwn(state.reviewDrafts,item.id)?state.reviewDrafts[item.id]:item.note||'';
     const contexts=(item.selections||[]).filter((s,i,arr)=>arr.findIndex(row=>row.field===s.field)===i);
-    return `<article class="review-card ${item.mastered?'is-mastered':''}" data-review-card="${esc(item.id)}"><div class="review-card-top"><span class="review-source-title">${esc(src.package_title)}</span><span class="review-status">${item.mastered?icon('check')+' 已掌握':'慢慢记住'}</span></div><blockquote>${esc(item.quote)}</blockquote>${contexts.length?`<details class="review-context"><summary>看看摘录前后的讲解</summary>${contexts.map(s=>`<p>${esc(s.context)}</p>`).join('')}</details>`:''}<details class="review-source"><summary>来自故事里的这一句 · ${fmt(src.start)}</summary><p lang="en">${esc(src.en)}</p><p class="muted">${esc(src.zh)}</p><button class="text-button" data-review-source="${esc(item.id)}">${icon('play')}回到原视频这一句</button></details><label class="note-label" for="review-note-${esc(item.id)}">用自己的话记一记</label><textarea class="personal-note review-note" id="review-note-${esc(item.id)}" data-review-note="${esc(item.id)}" placeholder="这个词让我想到什么？下次想怎么用？" maxlength="10000">${esc(note)}</textarea><div class="review-note-actions"><button class="text-button" data-review-save-note="${esc(item.id)}">保存笔记</button><span class="review-note-status" data-note-status="${esc(item.id)}" aria-live="polite">${note!==(item.note||'')?'笔记尚未保存':''}</span></div><div class="review-card-footer"><span>复习 ${Number(item.review_count)||0} 次 · ${item.last_reviewed_at?'上次 '+reviewDate(item.last_reviewed_at):'第一次，从今天开始'}</span><div class="review-actions"><button class="button small" data-review-studied="${esc(item.id)}">今天复习过了</button><button class="button small" aria-pressed="${!!item.mastered}" data-review-mastered="${esc(item.id)}">${icon('check')}${item.mastered?'继续练习':'标记掌握'}</button><button class="text-button review-remove" data-review-remove="${esc(item.id)}">移除</button></div></div>${state.reviewDelete===item.id?`<div class="review-delete-confirm" role="alert"><span>移除这条摘录和它的笔记？原素材会保留。</span><button class="button small" data-review-keep="${esc(item.id)}">保留</button><button class="button small danger" data-review-delete="${esc(item.id)}">确认移除</button></div>`:''}</article>`;
-  }).join(''):`<div class="review-empty"><span class="review-empty-mark">“</span><h2>${state.reviews.length?'暂时没有这样的摘录':'喜欢的一句，值得再见。'}</h2><p>${state.reviews.length?'换个关键词，或看看其他复习状态。':'打开视频的词句讲解，划选想记住的单词、短语或解释，保存到这里。'}</p><button class="button small" ${state.reviews.length?'data-review-reset':'data-home'}>${state.reviews.length?'查看全部摘录':'去素材库听一听'}</button></div>`;
+    return `<details class="review-card ${item.mastered?'is-mastered':''}" data-review-card="${esc(item.id)}" ${state.reviewExpanded.has(item.id)?'open':''}><summary class="review-card-summary"><span lang="en">${esc(reviewEnglish(item))}</span>${icon('chevron')}</summary><div class="review-card-body"><div class="review-card-top"><span class="review-source-title">${esc(src.package_title)}</span><span class="review-status">${item.mastered?icon('check')+' 已掌握':'慢慢记住'}</span></div><div class="review-item-category">${favorite?`<span class="favorite-label">${icon('star')}收藏的句子</span>`:`<label for="review-category-${esc(item.id)}">这条内容是</label><select id="review-category-${esc(item.id)}" data-review-category-select="${esc(item.id)}" aria-label="这条复习内容的分类">${Object.entries(reviewCategories).map(([value,label])=>`<option value="${value}" ${reviewCategory(item)===value?'selected':''}>${label}</option>`).join('')}</select>`}</div>${favorite?`<p class="review-translation">${esc(src.zh||'这句话暂时还没有中文翻译。')}</p>`:`<blockquote>${esc(item.quote)}</blockquote>`}${contexts.length?`<details class="review-context"><summary>看看摘录前后的讲解</summary>${contexts.map(s=>`<p>${esc(s.context)}</p>`).join('')}</details>`:''}<div class="review-source"><p class="review-source-caption">来自故事里的这一句 · ${fmt(src.start)}</p>${favorite?'':`<p lang="en">${esc(src.en)}</p><p class="muted">${esc(src.zh)}</p>`}<button class="text-button" data-review-source="${esc(item.id)}">${icon('play')}回到原视频这一句</button></div><label class="note-label" for="review-note-${esc(item.id)}">用自己的话记一记</label><textarea class="personal-note review-note" id="review-note-${esc(item.id)}" data-review-note="${esc(item.id)}" placeholder="这个词让我想到什么？下次想怎么用？" maxlength="10000">${esc(note)}</textarea><div class="review-note-actions"><button class="text-button" data-review-save-note="${esc(item.id)}">保存笔记</button><span class="review-note-status" data-note-status="${esc(item.id)}" aria-live="polite">${note!==(item.note||'')?'笔记尚未保存':''}</span></div><div class="review-card-footer"><span>复习 ${Number(item.review_count)||0} 次 · ${item.last_reviewed_at?'上次 '+reviewDate(item.last_reviewed_at):'第一次，从今天开始'}</span><div class="review-actions"><button class="button small" data-review-studied="${esc(item.id)}">今天复习过了</button><button class="button small" aria-pressed="${!!item.mastered}" data-review-mastered="${esc(item.id)}">${icon('check')}${item.mastered?'继续练习':'标记掌握'}</button><button class="text-button review-remove" data-review-remove="${esc(item.id)}">${favorite?'移除并取消收藏':'移除'}</button></div></div>${state.reviewDelete===item.id?`<div class="review-delete-confirm" role="alert"><span>${favorite?'取消收藏后，这张卡片会从复习库隐藏。已保存的笔记与复习记录会保留，再次收藏时可以接着使用。':'移除这条摘录和它的笔记？原素材会保留。'}</span><button class="button small" data-review-keep="${esc(item.id)}">保留</button><button class="button small danger" data-review-delete="${esc(item.id)}">${favorite?'移除并取消收藏':'确认移除'}</button></div>`:''}</div></details>`;
+  }).join(''):`<div class="review-empty"><span class="review-empty-mark">“</span><h2>${all.length?'暂时没有这样的内容':'喜欢的一句，值得再见。'}</h2><p>${all.length?'换个关键词、内容分类，或看看其他复习状态。':'收藏视频里的句子，或在精讲中划选想记住的单词、短语和解释。它们都会来到这里。'}</p><button class="button small" ${all.length?'data-review-reset':'data-home'}>${all.length?'查看全部内容':'去素材库听一听'}</button></div>`;
 }
+document.addEventListener('toggle',e=>{const card=e.target;if(!card.matches?.('[data-review-card]')||!card.isConnected)return;if(card.open)state.reviewExpanded.add(card.dataset.reviewCard);else state.reviewExpanded.delete(card.dataset.reviewCard);},true);
+
 function updateReviewItem(item){reviewRevision++;state.reviews=state.reviews.map(old=>old.id===item.id?item:old);renderReviewList();}
 async function reviewAction(id,change,message){const result=await api('/api/reviews/update',{id,...change});updateReviewItem(result.item);toast(message);}
 async function jumpToReviewSource(item){
@@ -290,6 +318,14 @@ async function jumpToReviewSource(item){
   await openPackage(original.folder,item.source);
 }
 document.addEventListener('input',e=>{const id=e.target.dataset?.reviewNote;if(!id)return;state.reviewDrafts[id]=e.target.value;const status=[...document.querySelectorAll('[data-note-status]')].find(node=>node.dataset.noteStatus===id);if(status)status.textContent='笔记尚未保存';});
+document.addEventListener('change',async e=>{
+  const id=e.target.dataset?.reviewCategorySelect;if(!id)return;
+  const select=e.target,item=state.reviews.find(item=>item.id===id);if(!item)return;
+  select.disabled=true;
+  try{await reviewAction(id,{category:select.value},'分类已保存');}
+  catch(error){select.value=reviewCategory(item);toast(error.message);}
+  finally{select.disabled=false;}
+});
 
 function mark(kind){const id=current().id,arr=state.progress[kind];state.progress[kind]=arr.includes(id)?arr.filter(x=>x!==id):[...arr,id];renderLesson();renderList();updateMastery();persist();}
 function checkDictation(){
@@ -305,11 +341,14 @@ function checkDictation(){
 }
 
 function persist(immediate=false){
-  if(!state.pkg)return;const video=$('#video');
+  if(!state.pkg)return true;const video=$('#video');
   Object.assign(state.progress,{lastTime:video?.currentTime||0,lastSegment:current()?.id,mode:state.mode,subtitles:state.subtitles,loop:state.loop});
   const payload={folder:state.pkg.folder,progress:structuredClone(state.progress)},revision=++saveRevision;
   clearTimeout(state.saveTimer);
-  const save=async()=>{try{await api('/api/progress',payload);if(revision===saveRevision&&$('#save-status')){$('#save-status').innerHTML=`${icon('check')}进度已保存`;$('#save-status').classList.remove('progress-error');}}catch(e){if($('#save-status')){$('#save-status').textContent='进度保存失败';$('#save-status').classList.add('progress-error');}}};
+  const save=()=>{
+    const pending=progressQueue.then(async()=>{try{await api('/api/progress',payload);reviewRevision++;if(revision===saveRevision&&$('#save-status')){$('#save-status').innerHTML=`${icon('check')}进度已保存`;$('#save-status').classList.remove('progress-error');}return true;}catch(e){if(revision===saveRevision&&$('#save-status')){$('#save-status').textContent='进度保存失败';$('#save-status').classList.add('progress-error');}return false;}});
+    progressQueue=pending;return pending;
+  };
   if(immediate)return save();else state.saveTimer=setTimeout(save,650);
 }
 setInterval(()=>{if(state.page==='study'&&$('#video')&&!$('#video').paused)persist();},5000);
@@ -420,14 +459,15 @@ document.addEventListener('click',async e=>{
     else if(b.hasAttribute('data-save-selection'))await saveSelection();
     else if(b.dataset.saveFields)await saveSelection({folder:state.pkg.folder,segment_id:current().id,selections:fullSelections(b.dataset.saveFields.split(','))});
     else if(b.hasAttribute('data-review-refresh'))await openReviews();
+    else if(b.dataset.reviewCategory){state.reviewCategory=b.dataset.reviewCategory;state.reviewDelete=null;renderReviewList();}
     else if(b.dataset.reviewFilter){state.reviewFilter=b.dataset.reviewFilter;state.reviewDelete=null;renderReviewList();}
-    else if(b.hasAttribute('data-review-reset')){state.reviewFilter='all';state.reviewSearch='';renderReviews();}
+    else if(b.hasAttribute('data-review-reset')){state.reviewFilter='all';state.reviewCategory='all';state.reviewSearch='';renderReviews();}
     else if(b.dataset.reviewSaveNote){const id=b.dataset.reviewSaveNote,note=state.reviewDrafts[id]??state.reviews.find(item=>item.id===id)?.note??'';b.disabled=true;try{const result=await api('/api/reviews/update',{id,note});if(state.reviewDrafts[id]===note)delete state.reviewDrafts[id];updateReviewItem(result.item);toast(Object.prototype.hasOwnProperty.call(state.reviewDrafts,id)?'笔记已保存，刚刚的新修改仍可继续保存':'笔记已保存');}finally{b.disabled=false;}}
     else if(b.dataset.reviewStudied){b.disabled=true;try{await reviewAction(b.dataset.reviewStudied,{action:'reviewed'},'又见面了一次，记忆会慢慢变牢。');}finally{b.disabled=false;}}
     else if(b.dataset.reviewMastered){const item=state.reviews.find(item=>item.id===b.dataset.reviewMastered);await reviewAction(item.id,{mastered:!item.mastered},item.mastered?'已放回继续练习':'已标记掌握');}
     else if(b.dataset.reviewRemove){state.reviewDelete=b.dataset.reviewRemove;renderReviewList();}
     else if(b.dataset.reviewKeep){state.reviewDelete=null;renderReviewList();}
-    else if(b.dataset.reviewDelete){const id=b.dataset.reviewDelete;b.disabled=true;try{await api('/api/reviews/delete',{id});reviewRevision++;state.reviews=state.reviews.filter(item=>item.id!==id);delete state.reviewDrafts[id];state.reviewDelete=null;renderReviewList();toast('摘录已移除');}finally{b.disabled=false;}}
+    else if(b.dataset.reviewDelete){const id=b.dataset.reviewDelete,favorite=state.reviews.find(item=>item.id===id)?.kind==='favorite';b.disabled=true;try{await api('/api/reviews/delete',{id});reviewRevision++;state.reviews=state.reviews.filter(item=>item.id!==id);delete state.reviewDrafts[id];state.reviewExpanded.delete(id);state.reviewDelete=null;renderReviewList();toast(favorite?'已取消收藏，已保存的笔记与复习记录仍会保留':'摘录已移除');}finally{b.disabled=false;}}
     else if(b.dataset.reviewSource){const item=state.reviews.find(item=>item.id===b.dataset.reviewSource);b.disabled=true;try{if(item)await jumpToReviewSource(item);}finally{b.disabled=false;}}
     else if(b.dataset.cancel){await api('/api/cancel',{id:b.dataset.cancel});await pollJobs();}
     else if(b.dataset.dismiss){dismissed.add(b.dataset.dismiss);await pollJobs();if($('#jobs-area'))$('#jobs-area').innerHTML=jobCards();}

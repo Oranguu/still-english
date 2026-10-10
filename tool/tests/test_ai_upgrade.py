@@ -30,7 +30,31 @@ def lesson(identifier):
     }
 
 
+def simple_lesson(identifier):
+    row = lesson(identifier)
+    row["analysis"].pop("phrases")
+    row["analysis"].pop("sentence_parts")
+    row["analysis"]["grammar"] = []
+    return row
+
+
 class LessonValidationTests(unittest.TestCase):
+    def test_simple_lesson_accepts_brief_sections_without_sentence_breakdown(self):
+        row = simple_lesson("s0")
+        row["analysis"]["vocabulary"] = []
+        self.assertEqual(ai.validate_batch({"segments": [row]}, [{"id": "s0"}], detailed=False), [row])
+        with self.assertRaises(ValueError):
+            ai.validate_batch({"segments": [row]}, [{"id": "s0"}], detailed=True)
+
+    def test_simple_lesson_still_validates_content_and_limits_length(self):
+        for field, value in (("meaning", " "), ("practice", None), ("grammar", [None]),
+                             ("speech", "invalid"), ("sentence_parts", "invalid"),
+                             ("vocabulary", [lesson("s0")["analysis"]["vocabulary"][0]] * 4)):
+            row = simple_lesson("s0")
+            row["analysis"][field] = value
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                ai.validate_batch({"segments": [row]}, [{"id": "s0"}], detailed=False)
+
     def test_malformed_batch_is_rejected_without_type_errors(self):
         for output in (None, [], {"segments": [None]}, {"segments": ["s0"]}):
             with self.subTest(output=output), self.assertRaises(ValueError):
@@ -83,6 +107,8 @@ class AnalysisUpgradeTests(unittest.TestCase):
         cli_patch.start()
         self.addCleanup(cli_patch.stop)
         self.requests = []
+        self.detailed_requests = []
+        self.schemas = []
         self.fail_batch = None
 
     def package(self, count):
@@ -98,11 +124,17 @@ class AnalysisUpgradeTests(unittest.TestCase):
         return SimpleNamespace(id=identifier, update=Mock(), check=Mock())
 
     def run_model(self, command, job, **kwargs):
-        request = json.loads(kwargs["input_text"][len(ai.INSTRUCTIONS):].strip())
+        detailed = kwargs["input_text"].startswith(ai.INSTRUCTIONS)
+        instructions = ai.INSTRUCTIONS if detailed else ai.SIMPLE_INSTRUCTIONS
+        self.assertTrue(kwargs["input_text"].startswith(instructions))
+        request = json.loads(kwargs["input_text"][len(instructions):].strip())
         self.requests.append(request)
-        rows = [lesson(segment["id"]) for segment in request["requested"]]
+        self.detailed_requests.append(detailed)
+        schema = Path(command[command.index("--output-schema") + 1])
+        self.schemas.append(json.loads(schema.read_text()))
+        rows = [(lesson if detailed else simple_lesson)(segment["id"]) for segment in request["requested"]]
         if len(self.requests) == self.fail_batch:
-            rows[-1]["analysis"]["sentence_parts"] = []
+            rows[-1]["analysis"]["meaning"] = ""
         output = Path(command[command.index("--output-last-message") + 1])
         output.write_text(json.dumps({"segments": rows}), encoding="utf8")
 
@@ -115,9 +147,65 @@ class AnalysisUpgradeTests(unittest.TestCase):
         self.assertEqual([row["id"] for row in self.requests[0]["requested"]], ["s1"])
         self.assertEqual(data["segments"][0], original["segments"][0])
         self.assertEqual(data["segments"][2], original["segments"][2])
-        self.assertEqual(data["segments"][1]["analysis_version"], 2)
+        self.assertEqual(data["segments"][1]["analysis_version"], 1)
+        self.assertEqual(self.detailed_requests, [False])
+        self.assertEqual(self.schemas, [ai.SIMPLE_SCHEMA])
         backup = self.state / "backups" / "job-one" / "manifest.json"
         self.assertEqual(json.loads(backup.read_text()), original)
+
+    def test_new_material_uses_simple_batches_and_resumes_without_regenerating(self):
+        data = self.package(ai.SIMPLE_BATCH_SIZE + 2)
+        for segment in data["segments"]:
+            segment.update(analysis=None, zh="")
+        save_package(self.folder, data)
+        self.fail_batch = 2
+        job = self.job()
+        with self.assertRaises(ValueError):
+            ai.analyze(self.folder, data, job, self.run_model)
+        self.assertEqual(sum(s.get("analysis_version") == 1 for s in data["segments"]), ai.SIMPLE_BATCH_SIZE)
+        self.assertTrue(all(not detailed for detailed in self.detailed_requests))
+        self.assertIn("简单讲解", job.update.call_args.kwargs["message"])
+        completed = copy.deepcopy(data["segments"][:ai.SIMPLE_BATCH_SIZE])
+        self.fail_batch = None
+        ai.analyze(self.folder, data, self.job("retry"), self.run_model)
+        self.assertEqual(len(self.requests[-1]["requested"]), 2)
+        self.assertEqual(data["segments"][:ai.SIMPLE_BATCH_SIZE], completed)
+        self.assertTrue(all(s["analysis_version"] == 1 for s in data["segments"]))
+        self.assertTrue(all("sentence_parts" not in s["analysis"] for s in data["segments"]))
+
+    def test_fill_translation_preserves_existing_detailed_and_simple_lessons(self):
+        data = self.package(3)
+        data["segments"][0].update(analysis=lesson("s0")["analysis"], analysis_version=2)
+        data["segments"][1]["analysis_version"] = 1
+        for segment in data["segments"]:
+            segment["zh"] = ""
+        original = copy.deepcopy(data)
+        save_package(self.folder, data)
+        ai.analyze(self.folder, data, self.job(), self.run_model)
+        for actual, previous in zip(data["segments"], original["segments"]):
+            self.assertEqual(actual["analysis"], previous["analysis"])
+            self.assertEqual(actual.get("analysis_version"), previous.get("analysis_version"))
+            self.assertTrue(actual["zh"])
+        self.assertEqual(self.detailed_requests, [False])
+        ai.analyze(self.folder, data, self.job("already-complete"), self.run_model)
+        self.assertEqual(len(self.requests), 1)
+
+    def test_simple_lesson_upgrades_only_selected_sentence_then_stays_detailed(self):
+        data = self.package(2)
+        for segment in data["segments"]:
+            segment.update(analysis=None, zh="")
+        ai.analyze(self.folder, data, self.job(), self.run_model)
+        untouched = copy.deepcopy(data["segments"][0])
+        ai.analyze(self.folder, data, self.job("upgrade"), self.run_model, upgrade=True, segment_id="s1")
+        self.assertEqual(self.detailed_requests, [False, True])
+        self.assertEqual(self.schemas[-1], ai.SCHEMA)
+        self.assertEqual([s["id"] for s in self.requests[-1]["requested"]], ["s1"])
+        self.assertEqual(data["segments"][0], untouched)
+        self.assertEqual(data["segments"][1]["analysis_version"], 2)
+        self.assertIn("sentence_parts", data["segments"][1]["analysis"])
+        ai.analyze(self.folder, data, self.job("fill"), self.run_model)
+        ai.analyze(self.folder, data, self.job("repeat-upgrade"), self.run_model, upgrade=True, segment_id="s1")
+        self.assertEqual(len(self.requests), 2)
 
     def test_segment_upgrade_keeps_other_segments_and_skips_finished_work(self):
         data = self.package(3)

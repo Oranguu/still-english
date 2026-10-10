@@ -87,7 +87,7 @@ class Handler(BaseHTTPRequestHandler):
             path = unquote(parsed.path)
             query = parse_qs(parsed.query)
             if path == "/api/status":
-                return self.reply({"token": TOKEN, "ai": ai.auth_status(), "root": str(ROOT), "version": "1.2.0", "transcription": bool(jobs.importlib.util.find_spec("faster_whisper"))})
+                return self.reply({"token": TOKEN, "ai": ai.auth_status(), "root": str(ROOT), "version": "1.3.0", "transcription": bool(jobs.importlib.util.find_spec("faster_whisper"))})
             if path == "/api/packages":
                 return self.reply({"packages": list_packages()})
             if path == "/api/jobs":

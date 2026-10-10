@@ -17,4 +17,6 @@ tool/.venv/bin/python tool/launcher.py
 
 AI 讲解需要用户自己的 Codex CLI 和 ChatGPT 登录，使用自己的 Codex 用量。已有素材包可离线学习。
 
+新素材和缺失讲解默认生成简单版，已有讲解保留。需要更细的解释时，在当前句点击「升级这一句精讲」，只升级选中的一句。
+
 分享源码请使用 GitHub Download ZIP 或根目录 README 中的导出方法，不要直接压缩包含个人数据的工作目录。

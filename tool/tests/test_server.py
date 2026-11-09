@@ -4,6 +4,7 @@ import sys
 import tempfile
 import threading
 import unittest
+import uuid
 from pathlib import Path
 from unittest.mock import patch
 
@@ -61,6 +62,29 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(self.post('/api/progress',data)[0],200)
         result=json.loads(self.request('GET','/api/progress?folder=sample')[2])
         self.assertEqual(result,data['progress'])
+
+    def test_listening_routes_require_local_token_and_record_idempotent_results(self):
+        data={'folder':'sample','segment_id':'s1','reason':'sound'}
+        self.assertEqual(self.request('POST','/api/listening/mark',json.dumps(data))[0],403)
+        self.assertEqual(self.request('GET','/api/listening',headers={'Origin':'https://example.com'})[0],403)
+        status,_,raw=self.post('/api/listening/mark',data)
+        self.assertEqual(status,200)
+        item=json.loads(raw)['item']
+        result=json.loads(self.request('GET','/api/listening')[2])
+        self.assertIn(item['id'],[row['id'] for row in result['items']])
+        self.assertTrue(result['now'].endswith('Z'))
+        before={path.name:path.read_bytes() for path in (self.root/'review'/'items').glob('*.json')}
+        grade={'id':item['id'],'result':'understood','assisted':True,'attempt_id':str(uuid.uuid4())}
+        self.assertEqual(self.post('/api/listening/grade',grade)[0],400)
+        grade['assisted']=False
+        status,_,raw=self.post('/api/listening/grade',grade)
+        self.assertEqual(status,200)
+        first=json.loads(raw)
+        self.assertEqual((first['duplicate'],first['item']['listening_count'],first['item']['interval_days']),(False,1,3))
+        retry=json.loads(self.post('/api/listening/grade',grade)[2])
+        self.assertEqual((retry['duplicate'],retry['item']['listening_count']),(True,1))
+        self.assertEqual(before,{path.name:path.read_bytes() for path in (self.root/'review'/'items').glob('*.json')})
+        self.assertEqual(self.post('/api/listening/mark',data|{'reason':None})[0],200)
 
     def test_favorites_join_reviews_and_review_delete_updates_only_favorites(self):
         progress={'favorites':['s1'],'notes':{'s1':'Initial sentence note'},'lastTime':1.6,'dictation':{'s1':'hello'}}

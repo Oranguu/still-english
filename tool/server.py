@@ -15,6 +15,7 @@ from urllib.parse import unquote, urlparse, parse_qs, quote
 
 import ai
 import jobs
+import listening
 import reviews
 from captions import read_cues, segment_cues
 from packages import TOOL, ROOT, STATE, atomic_json, safe_path, validate, list_packages, read_package, package_folder, save_package, library_root, migrate_library
@@ -87,13 +88,15 @@ class Handler(BaseHTTPRequestHandler):
             path = unquote(parsed.path)
             query = parse_qs(parsed.query)
             if path == "/api/status":
-                return self.reply({"token": TOKEN, "ai": ai.auth_status(), "root": str(ROOT), "version": "1.3.0", "transcription": bool(jobs.importlib.util.find_spec("faster_whisper"))})
+                return self.reply({"token": TOKEN, "ai": ai.auth_status(), "root": str(ROOT), "version": "1.4.0", "transcription": bool(jobs.importlib.util.find_spec("faster_whisper"))})
             if path == "/api/packages":
                 return self.reply({"packages": list_packages()})
             if path == "/api/jobs":
                 return self.reply({"jobs": jobs.snapshots()})
             if path == "/api/reviews":
                 return self.reply({"items": reviews.list_reviews(STATE)})
+            if path == "/api/listening":
+                return self.reply(listening.listening_state(STATE))
             if path == "/api/package":
                 folder = query.get("folder", [""])[0]
                 data = read_package(folder)
@@ -149,6 +152,10 @@ class Handler(BaseHTTPRequestHandler):
             data = json.loads(self.body() or b"{}")
             if not isinstance(data, dict):
                 raise ValueError("请求格式无效")
+            if path == "/api/listening/mark":
+                return self.reply(listening.mark_difficulty(data, STATE))
+            if path == "/api/listening/grade":
+                return self.reply(listening.grade_attempt(data, STATE))
             if path == "/api/reviews/add":
                 return self.reply(reviews.add_review(data))
             if path == "/api/reviews/update":

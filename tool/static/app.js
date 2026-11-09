@@ -23,6 +23,9 @@ const fmt = sec => {sec=Math.max(0,Math.floor(Number(sec)||0));return `${sec>=36
 const num = n => String(n).padStart(2,'0');
 const state = { token:'', packages:[], jobs:[], page:'library', route:null, pkg:null, progress:{}, current:0, mode:'watch', subtitles:'en', loop:false, analysisOpen:false, reveal:false, filter:'all', search:'', frame:0, loopTimer:0, saveTimer:0, jobSignature:'', loading:false, reviews:[], reviewFilter:'all', reviewCategory:'all', reviewSearch:'', reviewExpanded:new Set(), reviewDrafts:{}, reviewDelete:null, selection:null, reviewSaving:false };
 let toastTimer, saveRevision=0, routeRevision=0, reviewRevision=0, progressQueue=Promise.resolve(true), teardownPending=null;
+const listening={items:[],loaded:false,offset:0,mode:'due',queue:[],index:0,active:null,attempts:new Map(),completed:new Set(),skipped:new Set(),audio:null,epoch:0,frame:0,timer:0,feedback:'',markTarget:null,markBusy:false};
+state.reviewMode='text';
+const difficultyLabels={meaning:'看字幕也不懂',sound:'看得懂但听不出',speed:'慢一点能懂，原速跟不上'};
 function toast(message){$('#toast').textContent=message;$('#toast').classList.add('visible');clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('#toast').classList.remove('visible'),4000);}
 async function api(path, data, options={}){
   const response=await fetch(path,{...options,method:data!==undefined?'POST':options.method||'GET',headers:{...(data!==undefined?{'Content-Type':'application/json','X-Local-Token':state.token}:{}),...options.headers},body:data!==undefined?JSON.stringify(data):options.body});
@@ -34,6 +37,7 @@ const media = (pkg, path) => `/media/${encodeURIComponent(pkg.folder)}/${path.sp
 const current = () => state.pkg?.segments[state.current];
 function showImport(){ $('#download-error').textContent='';$('#import-dialog').showModal();setTimeout(()=>$('#video-url').focus(),30); }
 async function teardown(){
+  stopListening();
   if(teardownPending)return teardownPending;
   clearSelection();cancelAnimationFrame(state.frame);clearTimeout(state.loopTimer);
   const video=$('#video');if(!video)return true;
@@ -175,6 +179,7 @@ function renderLesson(){
   if(!s){$('#lesson').innerHTML=`<div class="analysis-empty">视频已经可以完整播放。添加英文字幕后，就能解锁逐句精听与讲解。<br><button class="button" data-caption>导入英文字幕</button> <button class="button" data-analyze>识别语音并生成简单讲解</button><p class="fine-print">本地识别需先运行 tool/安装语音转写.command；首次运行会下载语音模型。</p></div>`;return;}
   const visible=state.subtitles!=='none'||state.reveal, favorite=state.progress.favorites.includes(s.id),mastered=state.progress.mastered.includes(s.id);
   $('#lesson').innerHTML=`<div class="lesson-top"><div class="eyebrow">ONE SENTENCE AT A TIME / ${num(state.current+1)}</div><div class="lesson-actions"><button data-favorite aria-pressed="${favorite}">${icon('star')}${favorite?'已收藏':'收藏'}</button><button data-mastered aria-pressed="${mastered}">${icon('check')}${mastered?'已掌握':'标记掌握'}</button></div></div>${visible?`<p class="current-quote">${esc(s.en)}</p>${state.subtitles==='both'||state.reveal?`<p class="current-translation">${esc(s.zh||'中文翻译尚未生成，可在下方补全讲解。')}</p>`:''}`:`<div class="blind-prompt"><h3>先让耳朵，找到答案。</h3><p>反复听这一句，试着抓住几个熟悉的词。不着急。</p><button class="button small" data-reveal>准备好了，查看原文</button></div>`}<details class="dictation" ${state.progress.dictations[s.id]?'open':''}><summary>${icon('pen')}写下我听到的 · 听写练习</summary><textarea id="dictation" placeholder="Type what you hear…" aria-label="本句听写" spellcheck="false">${esc(state.progress.dictations[s.id]||'')}</textarea><div class="dictation-bottom"><button class="button small" data-check-dictation>对照答案</button><span id="dictation-result"></span></div><p class="fine-print" id="dictation-answer" hidden></p></details><button class="analysis-toggle" id="analysis-toggle" aria-expanded="${state.analysisOpen}"><span>把这一句，听明白<span class="tag">词句讲解</span></span>${icon('chevron')}</button><div id="analysis-content" class="analysis-content" ${state.analysisOpen?'':'hidden'}>${analysisMarkup(s)}</div><label class="note-label" for="personal-note">留给自己的笔记 <span>· 自动保存</span></label><textarea class="personal-note" id="personal-note" placeholder="记下一点发现，或写一个自己的句子…">${esc(state.progress.notes[s.id]||'')}</textarea>`;
+  $('.lesson-actions').insertAdjacentHTML('beforeend',`<button data-listening-mark>${icon('sound')}这句没听懂</button>`);
   $('#dictation').oninput=e=>{state.progress.dictations[s.id]=e.target.value;persist();};
   $('#personal-note').oninput=e=>{state.progress.notes[s.id]=e.target.value;persist();};
   $('#analysis-toggle').onclick=()=>{state.analysisOpen=!state.analysisOpen;$('#analysis-toggle').setAttribute('aria-expanded',state.analysisOpen);$('#analysis-content').hidden=!state.analysisOpen;if(!state.analysisOpen)clearSelection();};
@@ -272,17 +277,19 @@ async function openReviews(){
   const fresh=state.page!=='review',revision=++routeRevision;setRoute('review');const saved=await teardown();if(revision!==routeRevision)return;
   if(!saved){keepUnsavedStudy();return;}
   if(fresh)state.reviewExpanded.clear();
-  state.page='review';state.pkg=null;state.reviewDelete=null;setNavigation('review');
+  state.page='review';state.reviewMode='text';state.pkg=null;state.reviewDelete=null;setNavigation('review');
   $('#app').innerHTML='<div class="loading"><span class="spinner"></span>正在翻开你的复习库…</div>';
   try{
     let result,before;
     do{before=reviewRevision;result=await api('/api/reviews');if(revision!==routeRevision)return;}while(before!==reviewRevision);
-    state.reviews=result.items;renderReviews();
+    state.reviews=result.items;
+    try{const catalog=await api('/api/listening');if(revision!==routeRevision)return;acceptListeningCatalog(catalog);}catch{listening.loaded=false;}
+    if(revision!==routeRevision)return;renderReviews();
   }
   catch(e){if(revision===routeRevision){$('#app').innerHTML='<div class="empty">暂时无法打开复习库。<br><button class="button small" data-review-refresh>重新加载</button></div>';toast(e.message);}}
 }
 function renderReviews(){
-  $('#app').innerHTML=`<section class="review-page"><div class="review-heading"><div><div class="eyebrow">A LITTLE TO KEEP, A LITTLE TO REVISIT.</div><h1>让记住的，<em>留得久一点。</em></h1><p>划下的表达、收藏的句子，都在这里。先看英语想一想，再点开慢慢复习。</p></div><div class="review-total"><strong>${num(state.reviews.filter(item=>item.active!==false).length)}</strong><span>份小小的积累</span></div></div><div class="review-category-bar"><div class="segmented review-categories" aria-label="复习内容分类"><button data-review-category="all">全部内容</button>${Object.entries(reviewCategories).map(([value,label])=>`<button data-review-category="${value}">${label}</button>`).join('')}</div></div><div class="review-tools"><div class="filter-tabs review-filters" aria-label="复习状态"><button data-review-filter="all">全部状态</button><button data-review-filter="unmastered">继续练习</button><button data-review-filter="mastered">已经掌握</button></div><div class="search-box review-search">${icon('search')}<input id="review-search" type="search" value="${esc(state.reviewSearch)}" placeholder="找一个词、一条笔记或一个故事…" aria-label="搜索复习内容、笔记和来源"></div><button class="text-button" data-review-refresh aria-label="刷新复习库">${icon('replay')}</button></div><div id="review-summary" class="review-summary" aria-live="polite"></div><div id="review-list" class="review-list"></div><p class="library-note">${icon('folder')}收藏、摘录与笔记保存在本地 review 文件夹。即使原视频暂时不在，也能继续复习。</p></section>`;
+  $('#app').innerHTML=`<section class="review-page"><div class="review-heading"><div><div class="eyebrow">A LITTLE TO KEEP, A LITTLE TO REVISIT.</div><h1>让记住的，<em>留得久一点。</em></h1><p>划下的表达、收藏的句子，都在这里。先看英语想一想，再点开慢慢复习。</p></div><div class="review-total"><strong>${num(state.reviews.filter(item=>item.active!==false).length)}</strong><span>份小小的积累</span></div></div>${reviewModeMarkup()}<div class="review-category-bar"><div class="segmented review-categories" aria-label="复习内容分类"><button data-review-category="all">全部内容</button>${Object.entries(reviewCategories).map(([value,label])=>`<button data-review-category="${value}">${label}</button>`).join('')}</div></div><div class="review-tools"><div class="filter-tabs review-filters" aria-label="复习状态"><button data-review-filter="all">全部状态</button><button data-review-filter="unmastered">继续练习</button><button data-review-filter="mastered">已经掌握</button></div><div class="search-box review-search">${icon('search')}<input id="review-search" type="search" value="${esc(state.reviewSearch)}" placeholder="找一个词、一条笔记或一个故事…" aria-label="搜索复习内容、笔记和来源"></div><button class="text-button" data-review-refresh aria-label="刷新复习库">${icon('replay')}</button></div><div id="review-summary" class="review-summary" aria-live="polite"></div><div id="review-list" class="review-list"></div><p class="library-note">${icon('folder')}收藏、摘录与笔记保存在本地 review 文件夹。即使原视频暂时不在，也能继续复习。</p></section>`;
   $('#review-search').oninput=e=>{state.reviewSearch=e.target.value;renderReviewList();};renderReviewList();
 }
 function renderReviewList(){
@@ -302,6 +309,141 @@ function renderReviewList(){
   }).join(''):`<div class="review-empty"><span class="review-empty-mark">“</span><h2>${all.length?'暂时没有这样的内容':'喜欢的一句，值得再见。'}</h2><p>${all.length?'换个关键词、内容分类，或看看其他复习状态。':'收藏视频里的句子，或在精讲中划选想记住的单词、短语和解释。它们都会来到这里。'}</p><button class="button small" ${all.length?'data-review-reset':'data-home'}>${all.length?'查看全部内容':'去素材库听一听'}</button></div>`;
 }
 document.addEventListener('toggle',e=>{const card=e.target;if(!card.matches?.('[data-review-card]')||!card.isConnected)return;if(card.open)state.reviewExpanded.add(card.dataset.reviewCard);else state.reviewExpanded.delete(card.dataset.reviewCard);},true);
+
+function acceptListeningCatalog(result){listening.items=result.items;listening.loaded=true;const time=Date.parse(result.now);listening.offset=Number.isFinite(time)?time-Date.now():0;}
+function listeningDue(item){return !item.due_at||Date.parse(item.due_at)<=Date.now()+listening.offset;}
+function reviewModeMarkup(){const due=listening.loaded?listening.items.filter(listeningDue).length:'—';return `<div class="review-mode-tabs segmented" aria-label="复习方式"><button data-review-mode="text" aria-pressed="${state.reviewMode!=='listening'}">${icon('book')}文字复习</button><button data-review-mode="listening" aria-pressed="${state.reviewMode==='listening'}">${icon('sound')}听力复习 <span class="listening-due-count">今日 ${due}</span></button></div>`;}
+function stopListening(){
+  listening.epoch++;cancelAnimationFrame(listening.frame);clearTimeout(listening.timer);
+  if(listening.audio){listening.audio.pause();listening.audio.removeAttribute('src');listening.audio.load();listening.audio=null;}
+  if(listening.active){listening.active.playing=false;listening.active.ready=false;}
+}
+function pauseListening(){cancelAnimationFrame(listening.frame);clearTimeout(listening.timer);listening.audio?.pause();if(listening.active)listening.active.playing=false;updateListeningControls();}
+async function openListening(){
+  const fresh=state.page!=='review'||state.reviewMode!=='listening',revision=++routeRevision;
+  setRoute('review-listening');const saved=await teardown();if(revision!==routeRevision)return;if(!saved){keepUnsavedStudy();return;}
+  if(fresh){listening.completed.clear();listening.skipped.clear();listening.attempts.clear();listening.feedback='';listening.mode='due';}
+  state.page='review';state.reviewMode='listening';state.pkg=null;setNavigation('review');
+  renderListeningShell();$('#listening-workspace').innerHTML='<div class="loading"><span class="spinner"></span>正在整理今天的原声练习…</div>';
+  try{const result=await api('/api/listening');if(revision!==routeRevision)return;acceptListeningCatalog(result);for(const id of listening.completed){const item=listening.items.find(row=>row.id===id);if(item&&listeningDue(item)){listening.completed.delete(id);listening.attempts.delete(id);}}buildListeningQueue();}
+  catch(error){if(revision===routeRevision){$('#listening-workspace').innerHTML='<div class="listening-empty"><h2>暂时没能打开听力库</h2><p>原来的摘录和笔记都还在。连接恢复后，再试一次就好。</p><button class="button small" data-listening-refresh>重新加载</button></div>';toast(error.message);}}
+}
+function renderListeningShell(){
+  $('#app').innerHTML=`<section class="review-page listening-page"><div class="review-heading"><div><div class="eyebrow">LISTEN FIRST. TAKE YOUR TIME.</div><h1>先用耳朵，<em>再找答案。</em></h1><p>听来源整句原声，试着自己理解。听完后再决定：记住了，还是再见一次。</p></div><div class="listening-emblem" aria-hidden="true">${icon('sound')}</div></div>${reviewModeMarkup()}<div class="listening-filter-row"><div class="filter-tabs"><button data-listening-filter="due">今天待练</button><button data-listening-filter="all">全部听力</button></div><button class="text-button" data-listening-refresh>${icon('replay')}刷新待练</button></div><div id="listening-feedback" class="listening-feedback" role="status"></div><div id="listening-workspace"></div><p class="listening-footnote">每次播放对应素材中的整句原声。同一句的收藏与摘录合并练习；讲解里的新例句不会冒用原视频的声音。</p></section>`;
+}
+function buildListeningQueue(){
+  stopListening();listening.queue=listening.items.filter(item=>!listening.completed.has(item.id)&&(listening.mode==='all'||listeningDue(item)));listening.index=0;
+  document.querySelectorAll('[data-listening-filter]').forEach(button=>{const active=button.dataset.listeningFilter===listening.mode;button.classList.toggle('active',active);button.setAttribute('aria-pressed',String(active));});
+  document.querySelectorAll('.listening-due-count').forEach(node=>node.textContent=`今日 ${listening.items.filter(listeningDue).length}`);
+  renderListeningCard();
+}
+function renderListeningCard(){
+  stopListening();if(state.page!=='review'||state.reviewMode!=='listening'||!$('#listening-workspace'))return;
+  document.querySelectorAll('[data-listening-filter], [data-listening-refresh], [data-review-mode="listening"]').forEach(button=>button.disabled=false);
+  $('#listening-feedback').textContent=listening.feedback;
+  const item=listening.queue[listening.index];
+  if(!item){
+    listening.active=null;
+    const missing=listening.queue.filter(row=>!row.audio?.available).length,unrecorded=listening.queue.filter(row=>!listening.completed.has(row.id)).length;
+    const title=missing?'还有原声需要找回来':unrecorded?'这一轮先到这里':listening.completed.size?'今天，耳朵又往前走了一点。':'现在没有到期的练习';
+    const detail=missing?`${missing} 句原声暂时不可用，重新导入原素材后再来。这些句子没有记为完成。`:unrecorded?`${unrecorded} 句尚未记录结果，可以稍后再练。`:listening.completed.size?`本次已记录 ${listening.completed.size} 句。它们会按本次的理解情况，在之后再次出现。`:'收藏语句、保存摘录，或在学习时标记「这句没听懂」，就能在这里练习来源整句原声。';
+    $('#listening-workspace').innerHTML=`<div class="listening-empty">${icon(missing?'folder':'sound')}<h2>${title}</h2><p>${detail}</p><div><button class="button small" data-listening-refresh>刷新待练</button><button class="text-button" data-review-mode="text">回到文字复习</button></div></div>`;return;
+  }
+  let attempt=listening.attempts.get(item.id);
+  if(!attempt){attempt={item,id:crypto.randomUUID(),assisted:false,listened:false,reveal:'none',rate:1,loop:false,playing:false,ready:false,started:false,available:!!item.audio?.available,grading:false,pendingGrade:null,error:''};listening.attempts.set(item.id,attempt);}
+  attempt.item=item;attempt.available=!!item.audio?.available;listening.active=attempt;
+  const hint={meaning:'先听完整一句。需要时再看英文，最后把意思弄清楚。',sound:'先抓住熟悉的声音，卡住时再对照英文。',speed:'先试原速，跟不上时可以慢听，再回到原速。'}[item.difficulty]||'先不看文字，听一听声音在表达什么。';
+  $('#listening-workspace').innerHTML=`<article class="listening-card"><div class="listening-card-top"><span>来源整句原声</span><span>第 ${listening.index+1} / ${listening.queue.length} 句</span></div><div class="listening-blind"><div class="listening-rings" aria-hidden="true">${icon('sound')}</div><h2>把这一句，交给耳朵。</h2><p>${hint}</p></div><audio id="listening-audio" preload="metadata" aria-hidden="true" hidden></audio><div id="listening-media-status" class="listening-media-status" role="status">${attempt.available?'正在准备原声音频…':'这句的本地原声暂时不可用。请重新导入原素材包，再刷新听力库；本句不会记为已完成。'}</div><div class="listening-player"><button class="button primary" data-listening-play disabled>${icon('play')}播放原声</button><button class="button" data-listening-replay disabled>${icon('replay')}重听</button><div class="segmented listening-rates" aria-label="原声速度"><button data-listening-rate="1" aria-pressed="${attempt.rate===1}">原速 1×</button><button data-listening-rate="0.85" aria-pressed="${attempt.rate===.85}">慢听 0.85×</button></div><button class="button listening-loop" data-listening-loop aria-pressed="${attempt.loop}">${icon('repeat')}循环本句</button></div><div class="listening-reveal-row"><button class="button small" data-listening-reveal="en">需要时，看看英文</button><span>看文字或慢听后，本次会记为使用了提示。</span></div><div id="listening-answer"></div><div id="listening-attempt-status" class="listening-attempt-status" aria-live="polite"></div><div class="listening-grade"><p>完整听过之后，选一个最接近的感受。</p><div><button class="button" data-listening-grade="understood" disabled>${icon('check')}原速听懂了</button><button class="button" data-listening-grade="hinted" disabled>提示后听懂</button><button class="button" data-listening-grade="missed" disabled>还没听清</button></div></div><div id="listening-grade-error" role="alert"></div><div class="listening-bottom"><span>这里只记录听力练习，不改变文字卡片的掌握状态。</span><button class="text-button" data-listening-skip>先跳过</button></div></article>`;
+  renderListeningAnswer();updateListeningControls();if(attempt.available)prepareListeningAudio(attempt);
+}
+function prepareListeningAudio(attempt){
+  const audio=$('#listening-audio'),epoch=listening.epoch,clip=attempt.item.audio;
+  listening.audio=audio;audio.playbackRate=attempt.rate;audio.src=media({folder:clip.folder},clip.video);
+  const valid=()=>epoch===listening.epoch&&listening.active===attempt&&state.reviewMode==='listening'&&state.page==='review';
+  const fail=()=>{if(!valid())return;pauseListening();attempt.available=false;clip.available=false;attempt.ready=false;$('#listening-media-status').textContent='这句原声暂时无法播放。请确认原素材完整，再刷新听力库；本句不会记为已完成。';updateListeningControls();};
+  audio.addEventListener('loadedmetadata',()=>{if(!valid())return;if(!Number.isFinite(clip.start)||!Number.isFinite(clip.end)||clip.start<0||clip.end<=clip.start||!Number.isFinite(audio.duration)||audio.duration<clip.end-.03){fail();return;}attempt.ready=true;audio.currentTime=clip.start;$('#listening-media-status').textContent=`${Math.max(1,Math.round(clip.end-clip.start))} 秒原声 · 点击开始`;updateListeningControls();});
+  audio.addEventListener('error',fail);
+  audio.addEventListener('timeupdate',()=>{if(valid())checkListeningEnd();});
+  audio.addEventListener('ended',()=>{if(valid()){if(audio.currentTime<clip.end-.08)fail();else checkListeningEnd();}});
+  audio.addEventListener('pause',()=>{if(valid()){attempt.playing=false;updateListeningControls();}});
+  audio.addEventListener('play',()=>{if(!valid()){audio.pause();return;}attempt.playing=true;attempt.lastPosition=audio.currentTime;attempt.lastObservedAt=performance.now();updateListeningControls();scheduleListeningBoundary();});
+  audio.load();
+}
+function scheduleListeningBoundary(){
+  cancelAnimationFrame(listening.frame);clearTimeout(listening.timer);
+  const audio=listening.audio,attempt=listening.active,epoch=listening.epoch;if(!audio||!attempt||audio.paused)return;
+  const frame=()=>{if(epoch!==listening.epoch)return;checkListeningEnd();if(!audio.paused)listening.frame=requestAnimationFrame(frame);};listening.frame=requestAnimationFrame(frame);
+  const remaining=Math.max(.02,(attempt.item.audio.end-audio.currentTime)/audio.playbackRate);
+  listening.timer=setTimeout(()=>{if(epoch!==listening.epoch)return;checkListeningEnd();if(!audio.paused)scheduleListeningBoundary();},remaining*1000+15);
+}
+function checkListeningEnd(){
+  const attempt=listening.active,audio=listening.audio;if(!attempt||!audio||!attempt.started)return;
+  if(Number.isFinite(attempt.lastPosition)){const now=performance.now(),advanced=audio.currentTime-attempt.lastPosition,elapsed=(now-attempt.lastObservedAt)/1000;if(advanced>=0&&advanced<=elapsed*audio.playbackRate+.2)attempt.heardSeconds+=advanced;else if(advanced>.2)attempt.traversalInvalid=true;attempt.lastPosition=audio.currentTime;attempt.lastObservedAt=now;}
+  if(audio.currentTime<attempt.item.audio.end-.025)return;
+  const epoch=listening.epoch,complete=!attempt.traversalInvalid&&attempt.heardSeconds>=attempt.item.audio.end-attempt.item.audio.start-.1;
+  attempt.started=false;pauseListening();audio.currentTime=attempt.item.audio.end;if(complete)attempt.listened=true;
+  $('#listening-media-status').textContent=complete?'这一遍听完了。可以重听，也可以记录你的感受。':'这次没有完整听过原句，请从头重听。';updateListeningControls();
+  if(attempt.loop&&!attempt.pendingGrade)listening.timer=setTimeout(()=>{if(epoch===listening.epoch&&listening.active===attempt&&attempt.loop)playListening(true);},650);
+}
+async function playListening(replay=false){
+  const attempt=listening.active,audio=listening.audio,epoch=listening.epoch;
+  if(!attempt?.ready||!attempt.available||!audio||attempt.pendingGrade)return;
+  clearTimeout(listening.timer);
+  if(!replay&&!audio.paused){pauseListening();return;}
+  if(replay||!attempt.started||audio.currentTime>=attempt.item.audio.end-.03||audio.currentTime<attempt.item.audio.start){audio.currentTime=attempt.item.audio.start;attempt.started=true;attempt.heardSeconds=0;attempt.traversalInvalid=false;attempt.lastPosition=undefined;}
+  try{await audio.play();if(epoch!==listening.epoch||listening.active!==attempt)audio.pause();}
+  catch(error){if(epoch===listening.epoch&&error.name!=='AbortError'){attempt.playing=false;$('#listening-media-status').textContent='播放没有开始，请再点击一次播放原声。';updateListeningControls();}}
+}
+function updateListeningControls(){
+  const attempt=listening.active;if(!attempt||!$('#listening-attempt-status')||state.reviewMode!=='listening')return;
+  const locked=!!attempt.pendingGrade,playable=attempt.ready&&attempt.available&&!locked;
+  for(const selector of ['[data-listening-play]','[data-listening-replay]'])$(selector).disabled=!playable;
+  $('[data-listening-play]').innerHTML=icon(attempt.playing?'pause':'play')+(attempt.playing?'暂停':'播放原声');
+  document.querySelectorAll('[data-listening-rate]').forEach(button=>{button.disabled=locked||!attempt.available;button.setAttribute('aria-pressed',String(Number(button.dataset.listeningRate)===attempt.rate));});
+  $('[data-listening-loop]').disabled=locked||!attempt.available;$('[data-listening-loop]').setAttribute('aria-pressed',String(attempt.loop));
+  document.querySelectorAll('[data-listening-reveal], [data-listening-retest], [data-listening-skip]').forEach(button=>button.disabled=locked);
+  document.querySelectorAll('[data-listening-filter], [data-listening-refresh], [data-review-mode="listening"]').forEach(button=>button.disabled=locked);
+  document.querySelectorAll('[data-listening-grade]').forEach(button=>button.disabled=locked||!attempt.available||!attempt.ready||!attempt.listened||(button.dataset.listeningGrade==='understood'&&attempt.assisted));
+  $('#listening-attempt-status').textContent=attempt.assisted?'本次已使用文字或慢听提示。藏起答案重听，也会保留这个记录。':attempt.listened?'已经完整听过，可以记录这次的理解情况。':'先完整听一遍，再记录结果。也可以提前查看提示。';
+  $('#listening-grade-error').innerHTML=attempt.error?`<p>${esc(attempt.error)}</p><button class="button small" data-listening-grade-retry ${attempt.grading?'disabled':''}>${attempt.grading?'正在保存…':'重试保存本次结果'}</button>`:'';
+}
+function renderListeningAnswer(){
+  const attempt=listening.active,node=$('#listening-answer');if(!attempt||!node)return;
+  if(attempt.reveal==='none'){node.innerHTML='';return;}
+  const item=attempt.item;
+  node.innerHTML=`<section class="listening-answer"><p class="listening-english" lang="en">${esc(item.source.en)}</p>${attempt.reveal==='both'?`<p class="listening-chinese">${esc(item.source.zh||'这句暂时还没有中文翻译。')}</p>${item.meaning?`<div class="listening-meaning"><span>再把意思弄清楚</span><p>${esc(item.meaning)}</p></div>`:''}`:'<button class="text-button" data-listening-reveal="both">再看中文与已有讲解</button>'}<div class="listening-answer-actions"><button class="button small" data-listening-retest>藏起答案，原速再听</button><button class="text-button" data-listening-source>回到学习空间</button></div><p class="listening-source-caption">${esc(item.source.package_title)} · ${fmt(item.source.start)}</p></section>`;
+}
+function revealListening(level){const attempt=listening.active;if(!attempt||attempt.pendingGrade)return;attempt.assisted=true;attempt.reveal=level;renderListeningAnswer();updateListeningControls();}
+function setListeningRate(rate){const attempt=listening.active;if(!attempt||attempt.pendingGrade)return;attempt.rate=rate;if(rate<1)attempt.assisted=true;if(listening.audio)listening.audio.playbackRate=rate;updateListeningControls();scheduleListeningBoundary();}
+async function gradeListening(result){
+  const attempt=listening.active;if(!attempt||attempt.grading||!attempt.available||!attempt.ready||!attempt.listened)return;
+  if(!attempt.pendingGrade){if(result==='understood'&&attempt.assisted)return;attempt.pendingGrade={id:attempt.item.id,result,attempt_id:attempt.id,assisted:attempt.assisted};}
+  attempt.grading=true;attempt.error='';pauseListening();updateListeningControls();
+  const epoch=listening.epoch;
+  try{
+    const response=await api('/api/listening/grade',attempt.pendingGrade),item=response.item;
+    if(epoch!==listening.epoch||state.page!=='review'||state.reviewMode!=='listening'||listening.active!==attempt)return;
+    listening.items=listening.items.map(row=>row.id===item.id?item:row);listening.completed.add(item.id);listening.attempts.delete(item.id);
+    const when=item.last_result==='missed'?'10 分钟后':item.interval_days===1?'明天':`${item.interval_days} 天后`;
+    listening.feedback=`已记录这次练习，${when}再见。`;listening.index++;document.querySelectorAll('.listening-due-count').forEach(node=>node.textContent=`今日 ${listening.items.filter(listeningDue).length}`);renderListeningCard();
+  }catch(error){if(epoch===listening.epoch&&listening.active===attempt){attempt.error=`结果暂时未确认：${error.message}。重试会使用同一次练习记录。`;}}
+  finally{attempt.grading=false;if(epoch===listening.epoch&&listening.active===attempt)updateListeningControls();}
+}
+async function showDifficulty(){
+  if(!state.pkg||!current()||listening.markBusy)return;$('#video')?.pause();listening.markTarget={folder:state.pkg.folder,segment_id:current().id,package_id:state.pkg.id};
+  $('#difficulty-error').textContent='';$('#difficulty-current').textContent='选择最接近你现在感受的一项。';$('[data-listening-reason="clear"]').hidden=true;$('#difficulty-dialog').showModal();
+  const target=listening.markTarget;
+  try{const catalog=await api('/api/listening');if(listening.markTarget!==target||!$('#difficulty-dialog').open)return;acceptListeningCatalog(catalog);const item=listening.items.find(row=>row.source.package_id===target.package_id&&row.source.segment_id===target.segment_id);if(item?.difficulty){$('#difficulty-current').textContent=`当前标记：${difficultyLabels[item.difficulty]}`;$('[data-listening-reason="clear"]').hidden=false;}}
+  catch{if($('#difficulty-dialog').open)$('#difficulty-current').textContent='选择后会保存到本地听力库。';}
+}
+async function markDifficulty(reason){
+  const target=listening.markTarget;if(!target||listening.markBusy)return;listening.markBusy=true;
+  $('#difficulty-error').textContent='';document.querySelectorAll('[data-listening-reason]').forEach(button=>button.disabled=true);
+  try{const response=await api('/api/listening/mark',{folder:target.folder,segment_id:target.segment_id,reason:reason==='clear'?null:reason});listening.loaded=false;$('#difficulty-dialog').close();toast(reason==='clear'?'已清除困难标记；已有收藏、摘录和练习记录会保留':'已加入听力待练。去「我的复习库 → 听力复习」再听一次。');}
+  catch(error){$('#difficulty-error').textContent=error.message;}
+  finally{listening.markBusy=false;document.querySelectorAll('[data-listening-reason]').forEach(button=>button.disabled=false);}
+}
+document.addEventListener('visibilitychange',()=>{if(document.hidden)pauseListening();});
 
 function updateReviewItem(item){reviewRevision++;state.reviews=state.reviews.map(old=>old.id===item.id?item:old);renderReviewList();}
 async function reviewAction(id,change,message){const result=await api('/api/reviews/update',{id,...change});updateReviewItem(result.item);toast(message);}
@@ -429,7 +571,7 @@ $('#download-form').onsubmit=async e=>{
   e.preventDefault();const button=e.target.querySelector('[type=submit]');button.disabled=true;$('#download-error').textContent='';
   try{await api('/api/download',{url:$('#video-url').value.trim(),analyze:$('#auto-ai').checked,browser:$('#cookie-browser').value});$('#import-dialog').close();await home();await pollJobs();toast('已开始准备素材包，可以在这里查看进度');}catch(e){$('#download-error').textContent=e.message;}finally{button.disabled=false;}
 };
-$('#home').onclick=home;$('#library-nav').onclick=home;$('#review-nav').onclick=openReviews;$('#guide-nav').onclick=()=>$('#guide-dialog').showModal();
+$('#home').onclick=home;$('#library-nav').onclick=home;$('#review-nav').onclick=openReviews;$('#guide-nav').onclick=()=>{pauseListening();$('#guide-dialog').showModal();};
 async function analyze(button,options={}){button.disabled=true;try{await api('/api/analyze',{folder:state.pkg.folder,...options});toast(options.upgrade?'正在升级这一句精讲，可以先继续学习':'正在补全简单讲解，已有内容会保留');await pollJobs();}finally{button.disabled=false;}}
 document.addEventListener('click',async e=>{
   const b=e.target.closest('button');if(!b)return;
@@ -446,6 +588,22 @@ document.addEventListener('click',async e=>{
     else if(b.hasAttribute('data-reveal')){state.reveal=true;renderLesson();}
     else if(b.hasAttribute('data-favorite'))mark('favorites');
     else if(b.hasAttribute('data-mastered'))mark('mastered');
+    else if(b.hasAttribute('data-listening-mark'))await showDifficulty();
+    else if(b.dataset.listeningReason)await markDifficulty(b.dataset.listeningReason);
+    else if(b.dataset.reviewMode==='listening')await openListening();
+    else if(b.dataset.reviewMode==='text')await openReviews();
+    else if(b.hasAttribute('data-listening-refresh'))await openListening();
+    else if(b.dataset.listeningFilter){listening.mode=b.dataset.listeningFilter;buildListeningQueue();}
+    else if(b.hasAttribute('data-listening-play'))await playListening();
+    else if(b.hasAttribute('data-listening-replay'))await playListening(true);
+    else if(b.dataset.listeningRate)setListeningRate(Number(b.dataset.listeningRate));
+    else if(b.hasAttribute('data-listening-loop')){const attempt=listening.active;if(attempt&&!attempt.pendingGrade){attempt.loop=!attempt.loop;if(!attempt.loop)clearTimeout(listening.timer);updateListeningControls();if(listening.audio&&!listening.audio.paused)scheduleListeningBoundary();}}
+    else if(b.dataset.listeningReveal)revealListening(b.dataset.listeningReveal);
+    else if(b.hasAttribute('data-listening-retest')){const attempt=listening.active;if(attempt&&!attempt.pendingGrade){attempt.reveal='none';attempt.listened=false;setListeningRate(1);renderListeningAnswer();updateListeningControls();await playListening(true);}}
+    else if(b.dataset.listeningGrade)await gradeListening(b.dataset.listeningGrade);
+    else if(b.hasAttribute('data-listening-grade-retry'))await gradeListening();
+    else if(b.hasAttribute('data-listening-skip')){if(listening.active&&!listening.active.pendingGrade){listening.skipped.add(listening.active.item.id);listening.index++;renderListeningCard();}}
+    else if(b.hasAttribute('data-listening-source')){const attempt=listening.active;if(attempt){pauseListening();await jumpToReviewSource(attempt.item);}}
     else if(b.hasAttribute('data-check-dictation'))checkDictation();
     else if(b.hasAttribute('data-caption'))$('#caption-input').click();
     else if(b.hasAttribute('data-analyze'))await analyze(b);
@@ -487,7 +645,7 @@ async function boot(){
 async function routeFromHash(){
   let route;try{route=decodeURIComponent(location.hash.slice(1))||'library';}catch{route='library';}
   if(route===state.route)return;
-  if(route==='review')await openReviews();else if(route==='library')await home();else await openPackage(route);
+  if(route==='review')await openReviews();else if(route==='review-listening')await openListening();else if(route==='library')await home();else await openPackage(route);
 }
 window.addEventListener('hashchange',()=>{if(state.token)routeFromHash();});
 boot();

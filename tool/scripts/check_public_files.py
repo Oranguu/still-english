@@ -12,6 +12,7 @@ PUBLIC_FILES = frozenset({
     "tool/ai.py", "tool/captions.py", "tool/jobs.py", "tool/launcher.py",
     "tool/packages.py", "tool/server.py", "tool/setup.py", "tool/transcribe.py",
     "tool/reviews.py", "tool/tests/test_storage_reviews.py", "tool/tests/test_ai_upgrade.py",
+    "tool/listening.py", "tool/tests/test_listening.py",
     "tool/启动.command", "tool/安装依赖.command", "tool/安装语音转写.command",
     "tool/static/index.html", "tool/static/app.js", "tool/static/style.css",
     "tool/static/favicon.svg", "tool/tests/test_core.py", "tool/tests/test_server.py",

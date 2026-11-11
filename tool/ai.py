@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import subprocess
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 from packages import STATE, atomic_json, save_package
 
@@ -40,6 +41,8 @@ ANALYSIS_VERSION = 2
 SIMPLE_ANALYSIS_VERSION = 1
 BATCH_SIZE = 4
 SIMPLE_BATCH_SIZE = 12
+SIMPLE_PARALLEL_THRESHOLD = 120
+SIMPLE_WORKERS = 4
 STR = {"type": "string", "minLength": 1}
 WORD = obj({"term": STR, "meaning": STR, "example": STR})
 # HTTPS works on networks that time out during the CLI's WebSocket handshake.
@@ -148,16 +151,21 @@ def analyze(folder, data, job, run, upgrade=False, segment_id=None):
     batch_size = BATCH_SIZE if upgrade else SIMPLE_BATCH_SIZE
     version = ANALYSIS_VERSION if upgrade else SIMPLE_ANALYSIS_VERSION
     total = len(scoped)
-    indices = {s["id"]: i for i, s in enumerate(data["segments"])}
+    source = [{"id": s["id"], "en": s["en"]} for s in data["segments"]]
+    title = data["title"]
+    indices = {s["id"]: i for i, s in enumerate(source)}
     backup = STATE / "backups" / job.id / "manifest.json"
-    for offset in range(0, len(pending), batch_size):
-        batch = pending[offset:offset + batch_size]
-        done = total - len(pending) + offset
-        label = "入门精讲" if upgrade else "简单讲解"
+    label = "入门精讲" if upgrade else "简单讲解"
+    done = total - len(pending)
+
+    def report():
         job.update(stage="analysis", message=f"正在制作{label} · {done}/{total} 句", progress=65 + 34 * done / max(1, total))
-        nearby = {i for s in batch for i in range(max(0, indices[s["id"]] - 2), min(len(data["segments"]), indices[s["id"]] + 3))}
-        context = [{"id": data["segments"][i]["id"], "en": data["segments"][i]["en"]} for i in sorted(nearby)]
-        prompt = instructions + "\n" + json.dumps({"title": data["title"], "context": context, "requested": [{"id":s["id"],"en":s["en"]} for s in batch]}, ensure_ascii=False)
+
+    def generate(offset):
+        batch = pending[offset:offset + batch_size]
+        nearby = {i for s in batch for i in range(max(0, indices[s["id"]] - 2), min(len(source), indices[s["id"]] + 3))}
+        context = [source[i] for i in sorted(nearby)]
+        prompt = instructions + "\n" + json.dumps({"title": title, "context": context, "requested": [{"id":s["id"],"en":s["en"]} for s in batch]}, ensure_ascii=False)
         outfile = work / f"batch-{offset:04}.json"
         command = [codex_path(), "exec", "--ignore-user-config", "--ephemeral", "--skip-git-repo-check", "--sandbox", "read-only", "-c", TRANSPORT, "-c", 'model_provider="still_https"',
                    "--cd", str(work), "-c", 'forced_login_method="chatgpt"', "-c", 'model_reasoning_effort="medium"',
@@ -165,7 +173,10 @@ def analyze(folder, data, job, run, upgrade=False, segment_id=None):
                    "--disable", "apps", "--disable", "plugins", "--disable", "browser_use", "--disable", "computer_use",
                    "--output-schema", str(schema), "--output-last-message", str(outfile), "-"]
         run(command, job, input_text=prompt, env=ai_env(), timeout=900, logfile=work / f"batch-{offset:04}.log", quiet=True)
-        rows = validate_batch(json.loads(outfile.read_text("utf8")), batch, detailed=upgrade)
+        return validate_batch(json.loads(outfile.read_text("utf8")), batch, detailed=upgrade)
+
+    def persist(rows):
+        nonlocal done
         job.check()
         # Validate a whole batch before touching the old lesson. Save each valid
         # batch so retrying an interrupted upgrade skips its completed segments.
@@ -185,3 +196,38 @@ def analyze(folder, data, job, run, upgrade=False, segment_id=None):
         save_package(folder, updated)
         data.clear()
         data.update(updated)
+        done += len(rows)
+        report()
+
+    report()
+    workers = SIMPLE_WORKERS if not upgrade and len(pending) >= SIMPLE_PARALLEL_THRESHOLD else 1
+    if workers == 1:
+        for offset in range(0, len(pending), batch_size):
+            persist(generate(offset))
+        return
+
+    # Keep only a few batches in flight. Workers generate independent results;
+    # this coordinator alone validates/saves them, so manifests cannot race.
+    offsets = iter(range(0, len(pending), batch_size))
+    failure = None
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="lesson") as pool:
+        active = {pool.submit(generate, offset) for offset in [next(offsets, None) for _ in range(workers)] if offset is not None}
+        while active:
+            finished, active = wait(active, timeout=.5, return_when=FIRST_COMPLETED)
+            job.check()
+            for future in finished:
+                try:
+                    rows = future.result()
+                except Exception as exc:
+                    failure = failure or exc
+                else:
+                    persist(rows)
+            # On a failed batch, let the already-running batches save their
+            # results, but do not start any more until the learner retries.
+            while failure is None and len(active) < workers:
+                offset = next(offsets, None)
+                if offset is None:
+                    break
+                active.add(pool.submit(generate, offset))
+    if failure is not None:
+        raise failure

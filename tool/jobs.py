@@ -31,7 +31,7 @@ class Job:
     def __init__(self, kind, **details):
         self.id = uuid.uuid4().hex[:12]
         self.cancelled = threading.Event()
-        self.process = None
+        self.processes = set()
         self.data = dict(id=self.id, kind=kind, status="queued", stage="waiting", progress=0, message="准备中…", created_at=time.time(), **details)
 
     def update(self, **values):
@@ -108,8 +108,9 @@ def cancel(job_id):
         if not job:
             raise ValueError("任务不存在")
         job.cancelled.set()
-        if job.process and job.process.poll() is None:
-            stop(job.process)
+        for process in job.processes:
+            if process.poll() is None:
+                stop(process)
 
 
 def stop(process):
@@ -128,7 +129,8 @@ def run(command, job, input_text=None, env=None, timeout=1800, logfile=None, qui
     logfile.parent.mkdir(parents=True, exist_ok=True)
     with logfile.open("w", encoding="utf8") as log:
         process = subprocess.Popen(command, stdin=subprocess.PIPE if input_text else subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, text=True, env=env, start_new_session=os.name != "nt")
-        job.process = process
+        with LOCK:
+            job.processes.add(process)
         if input_text:
             try:
                 process.stdin.write(input_text)
@@ -166,7 +168,8 @@ def run(command, job, input_text=None, env=None, timeout=1800, logfile=None, qui
                 time.sleep(.5)
             process.wait()
         finally:
-            job.process = None
+            with LOCK:
+                job.processes.discard(process)
         job.check()
         if timed_out:
             raise RuntimeError("处理超时，已完成的内容保留，请重试")

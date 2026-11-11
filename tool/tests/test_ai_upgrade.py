@@ -2,6 +2,8 @@ import copy
 import json
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -275,6 +277,101 @@ class AnalysisUpgradeTests(unittest.TestCase):
             ai.analyze(self.folder, data, job, self.run_model, upgrade=True)
         self.assertEqual(data, original)
         self.assertEqual(json.loads((self.folder / "manifest.json").read_text()), original)
+
+    def test_parallel_batches_save_out_of_order_without_losing_lessons(self):
+        data = self.package(ai.SIMPLE_BATCH_SIZE * 5 + 2)
+        for segment in data["segments"]:
+            segment.update(analysis=None, zh="")
+        save_package(self.folder, data)
+        original = copy.deepcopy(data)
+        ready = threading.Barrier(4)
+        second_saved = threading.Event()
+        save_order = []
+        real_save = save_package
+
+        def run(command, job, **kwargs):
+            request = json.loads(kwargs["input_text"][len(ai.SIMPLE_INSTRUCTIONS):].strip())
+            first = int(request["requested"][0]["id"][1:])
+            if first < ai.SIMPLE_BATCH_SIZE * 4:
+                ready.wait(timeout=5)
+            if first == 0:
+                self.assertTrue(second_saved.wait(timeout=5))
+            self.run_model(command, job, **kwargs)
+
+        def save(folder, updated):
+            real_save(folder, updated)
+            save_order.append(sum(bool(s.get("analysis")) for s in updated["segments"]))
+            if updated["segments"][ai.SIMPLE_BATCH_SIZE].get("analysis"):
+                second_saved.set()
+
+        with patch.object(ai, "SIMPLE_PARALLEL_THRESHOLD", 1), patch.object(ai, "save_package", side_effect=save):
+            ai.analyze(self.folder, data, self.job(), run)
+        self.assertEqual(save_order, sorted(save_order))
+        self.assertTrue(all(s.get("analysis_version") == 1 and s.get("zh") for s in data["segments"]))
+        self.assertEqual([s["id"] for s in data["segments"]], [s["id"] for s in original["segments"]])
+        self.assertEqual(json.loads((self.folder / "manifest.json").read_text()), data)
+        self.assertEqual(json.loads((self.state / "backups/job-one/manifest.json").read_text()), original)
+        self.assertEqual(len({s["id"] for r in self.requests for s in r["requested"]}), len(data["segments"]))
+
+    def test_parallel_failure_saves_other_finished_batches_and_retry_only_fills_missing(self):
+        data = self.package(ai.SIMPLE_BATCH_SIZE * 4)
+        for segment in data["segments"]:
+            segment.update(analysis=None, zh="")
+        save_package(self.folder, data)
+        ready = threading.Barrier(4)
+
+        def run(command, job, **kwargs):
+            ready.wait(timeout=5)
+            self.run_model(command, job, **kwargs)
+            output = Path(command[command.index("--output-last-message") + 1])
+            result = json.loads(output.read_text())
+            if result["segments"][0]["id"] == "s0":
+                result["segments"][0]["zh"] = ""
+                output.write_text(json.dumps(result))
+
+        with patch.object(ai, "SIMPLE_PARALLEL_THRESHOLD", 1), self.assertRaises(ValueError):
+            ai.analyze(self.folder, data, self.job(), run)
+        completed = copy.deepcopy(data["segments"][ai.SIMPLE_BATCH_SIZE:])
+        self.assertTrue(all(s.get("analysis") for s in completed))
+        self.assertTrue(all(not s.get("analysis") for s in data["segments"][:ai.SIMPLE_BATCH_SIZE]))
+        self.requests.clear()
+        ai.analyze(self.folder, data, self.job("retry"), self.run_model)
+        self.assertEqual([s["id"] for r in self.requests for s in r["requested"]], [f"s{i}" for i in range(ai.SIMPLE_BATCH_SIZE)])
+        self.assertEqual(data["segments"][ai.SIMPLE_BATCH_SIZE:], completed)
+
+    def test_cancellation_stops_every_parallel_child_process(self):
+        job = jobs.Job("analysis")
+        errors = []
+
+        def run(index):
+            try:
+                jobs.run([sys.executable, "-c", "import time; time.sleep(20)"], job,
+                         logfile=self.state / f"child-{index}.log", quiet=True)
+            except jobs.Cancelled:
+                errors.append(index)
+
+        threads = [threading.Thread(target=run, args=(i,)) for i in range(2)]
+        with patch.dict(jobs.JOBS, {job.id: job}):
+            try:
+                for thread in threads:
+                    thread.start()
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    with jobs.LOCK:
+                        if len(job.processes) == 2:
+                            break
+                    time.sleep(.01)
+                with jobs.LOCK:
+                    processes = list(job.processes)
+                self.assertEqual(len(processes), 2)
+            finally:
+                jobs.cancel(job.id)
+                for thread in threads:
+                    thread.join(timeout=5)
+        self.assertTrue(all(not thread.is_alive() for thread in threads))
+        self.assertTrue(all(process.poll() is not None for process in processes))
+        self.assertEqual(sorted(errors), [0, 1])
+        self.assertFalse(job.processes)
 
     def test_job_launch_forwards_upgrade_scope(self):
         data = self.package(1)

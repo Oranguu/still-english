@@ -14,6 +14,7 @@ from pathlib import Path
 from urllib.parse import unquote, urlparse, parse_qs, quote
 
 import ai
+import catalog
 import jobs
 import listening
 import local_media
@@ -89,7 +90,9 @@ class Handler(BaseHTTPRequestHandler):
             path = unquote(parsed.path)
             query = parse_qs(parsed.query)
             if path == "/api/status":
-                return self.reply({"token": TOKEN, "ai": ai.auth_status(), "root": str(ROOT), "version": "1.5.0", "transcription": bool(jobs.speech.backend())})
+                return self.reply({"token": TOKEN, "ai": ai.auth_status(), "root": str(ROOT), "version": "1.6.0", "transcription": bool(jobs.speech.backend())})
+            if path == "/api/library":
+                return self.reply(catalog.library(STATE, query.get("q", [""])[0], query.get("category", [""])[0], query.get("tag", []), query.get("sort", ["recent"])[0]))
             if path == "/api/packages":
                 return self.reply({"packages": list_packages()})
             if path == "/api/jobs":
@@ -160,6 +163,8 @@ class Handler(BaseHTTPRequestHandler):
             data = json.loads(self.body() or b"{}")
             if not isinstance(data, dict):
                 raise ValueError("请求格式无效")
+            if path == "/api/library/organize":
+                return self.reply(catalog.organize(data, STATE))
             if path == "/api/local/start":
                 if any(j.data["status"] in ("running", "queued") for j in jobs.JOBS.values()):
                     raise ValueError("已有制作任务正在进行，请完成或取消后再选择新视频")

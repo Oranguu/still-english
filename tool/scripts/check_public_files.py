@@ -14,6 +14,7 @@ PUBLIC_FILES = frozenset({
     "tool/reviews.py", "tool/tests/test_storage_reviews.py", "tool/tests/test_ai_upgrade.py",
     "tool/listening.py", "tool/tests/test_listening.py",
     "tool/local_media.py", "tool/tests/test_local_media.py",
+    "tool/catalog.py", "tool/tests/test_catalog.py",
     "tool/启动.command", "tool/安装依赖.command", "tool/安装语音转写.command",
     "tool/static/index.html", "tool/static/app.js", "tool/static/style.css",
     "tool/static/favicon.svg", "tool/tests/test_core.py", "tool/tests/test_server.py",

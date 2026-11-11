@@ -46,9 +46,28 @@
   <dialog id="guide-dialog">
     <form method="dialog"><button class="dialog-close icon-button" aria-label="关闭">×</button></form>
     <div class="eyebrow">MAKE IT YOURS</div><h2>每天几句，慢慢听懂。</h2>
+    <p class="guide-library-note">素材多了，可以用分类、标签和搜索来找。点击卡片「整理」添加自己的分类与标签；搜索也会查找中英文字幕，点击命中的原句即可开始精听。自动整理不消耗 AI 用量。</p>
     <ol class="guide-steps"><li><b>让本地视频成为教材</b><p>在「新建素材包 → 本地视频」选择电影、访谈或课程，也可以拖入一个视频。工具保留原文件，在本地从英文原声重新识别字幕，再按选择生成简单讲解。随附的字幕不会自动使用。</p></li><li><b>先看一遍，走进故事</b><p>选择「完整观看」，用英文字幕或无字幕感受视频。</p></li><li><b>选一句，反复听清</b><p>点击右侧语句进入精听。可以循环、慢放，也可以先不看原文，写下你听到的内容。</p></li><li><b>从小词开始，慢慢弄明白</b><p>新素材先生成简单讲解，看看翻译和重点词句。需要更细的解释时，点击「升级这一句精讲」，使用自己的 Codex 用量补充基础单词、短语和句子拆解；其他句子保持原样。</p></li><li><b>划下来，常常再见</b><p>用鼠标或长按划选讲解中的文字，点击「保存到复习库」。不方便划选时，也能用每条讲解下方的保存按钮。视频里收藏的句子也会进入复习库。卡片先只显示英语，点开再看讲解、记笔记；还可以按单词、短语、句子筛选，逐个标记掌握。</p></li><li><b>用耳朵，再认识一次</b><p>在学习时点击「这句没听懂」，标记卡住的原因。进入「我的复习库 → 听力复习」，先听来源整句原声，再按需要看英文、中文或慢听。完整听过后记录感受；看过提示或慢听过，这次就不会记为独立听懂。工具会安排下次练习时间，不会额外调用 AI。</p></li><li><b>把进步留在这里</b><p>进度自动保存，下次从上次的位置继续。素材包在工程的 source 文件夹，复习摘录在 review 文件夹，可分别复制备份；这些都是你的本地学习资料。</p></li></ol>
     <div class="shortcut-guide"><span><kbd>Space</kbd> 播放 / 暂停</span><span><kbd>←</kbd><kbd>→</kbd> 上下句</span><span><kbd>R</kbd> 重听</span><span><kbd>L</kbd> 循环</span><span><kbd>C</kbd> 字幕切换</span></div>
     <p class="fine-print">AI 讲解根据字幕生成；发音提示是常见规律，需对照原音确认。自动字幕也可能存在识别误差。</p>
+  </dialog>
+  <dialog id="catalog-dialog">
+    <form method="dialog"><button class="dialog-close icon-button" aria-label="关闭素材整理">×</button></form>
+    <div class="eyebrow">A PLACE FOR EVERY STORY</div><h2>给这个故事，找个位置。</h2>
+    <p class="muted" id="catalog-title"></p>
+    <form id="catalog-form">
+      <label class="field-label" for="catalog-category">分类</label>
+      <input id="catalog-category" type="text" list="catalog-categories" maxlength="32" required placeholder="选择已有分类，或输入新的分类">
+      <datalist id="catalog-categories"></datalist>
+      <label class="field-label" for="catalog-tags">标签</label>
+      <textarea id="catalog-tags" rows="3" maxlength="600" placeholder="例如：日常生活，旅行，想反复听"></textarea>
+      <p class="fine-print">用逗号或换行分隔，最多 16 个标签。留空可以清除标签。</p>
+      <div id="catalog-suggestions" class="catalog-suggestions"></div>
+      <p id="catalog-origin" class="fine-print"></p>
+      <div id="catalog-error" class="inline-error" role="alert"></div>
+      <div class="catalog-dialog-actions"><button class="text-button" type="button" id="catalog-reset">恢复自动整理</button><button class="button primary" type="submit" id="catalog-save">保存分类与标签</button></div>
+    </form>
+    <p class="fine-print">自动建议依据标题、来源与时长，不消耗 AI 用量。整理信息只保存在本机，不会改动视频、讲解或学习记录。</p>
   </dialog>
   <dialog id="difficulty-dialog">
     <form method="dialog"><button class="dialog-close icon-button" aria-label="关闭听力标记">×</button></form>

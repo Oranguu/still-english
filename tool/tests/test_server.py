@@ -63,6 +63,22 @@ class ServerTests(unittest.TestCase):
         result=json.loads(self.request('GET','/api/progress?folder=sample')[2])
         self.assertEqual(result,data['progress'])
 
+    def test_library_search_and_organization_require_local_access(self):
+        original=(self.folder/'manifest.json').read_bytes()
+        self.assertEqual(self.request('GET','/api/library',headers={'Origin':'https://example.com'})[0],403)
+        data={'folder':'sample','package_id':'sample','category':'My collection','tags':['Practice']}
+        self.assertEqual(self.request('POST','/api/library/organize',json.dumps(data))[0],403)
+        self.assertEqual(self.post('/api/library/organize',data)[0],200)
+        status,_,raw=self.request('GET','/api/library?q=hello&category=My%20collection&tag=practice')
+        result=json.loads(raw)
+        self.assertEqual(status,200)
+        self.assertEqual(result['matched'],1)
+        self.assertEqual(result['packages'][0]['match']['id'],'s1')
+        self.assertEqual(result['packages'][0]['tags'],['Practice'])
+        self.assertEqual((self.folder/'manifest.json').read_bytes(),original)
+        self.assertEqual(self.post('/api/library/organize',data|{'package_id':'wrong'})[0],400)
+        self.assertEqual(self.request('GET','/api/library?sort=wrong')[0],400)
+
     def test_listening_routes_require_local_token_and_record_idempotent_results(self):
         data={'folder':'sample','segment_id':'s1','reason':'sound'}
         self.assertEqual(self.request('POST','/api/listening/mark',json.dumps(data))[0],403)

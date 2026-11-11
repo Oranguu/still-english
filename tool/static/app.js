@@ -56,14 +56,73 @@ function jobCards(){
     return `<div class="job-card ${active?'':'error'}"><div><div class="job-title">${active?'<span class="status-dot"></span> ':''}${esc(title)}</div><div class="job-message">${esc(j.message)}</div></div><div class="job-actions">${j.folder?`<button class="button small" data-open="${esc(j.folder)}">先开始学习</button>`:''}${active?`<button class="text-button" data-cancel="${esc(j.id)}">取消</button>`:`<button class="button small" data-retry="${esc(j.id)}">重试</button><button class="text-button" data-dismiss="${esc(j.id)}">收起</button>`}</div>${active?`<div class="job-track"><span style="width:${Math.max(0,Math.min(100,j.progress||0))}%"></span></div><div class="job-subtle">制作完成后，视频、字幕与讲解都会保存在素材包中。</div>`:''}</div>`;
   }).join('');
 }
-async function loadLibrary(){
-  try{
-    const result=await api('/api/packages');state.packages=result.packages;
-    if(state.page!=='library')return;
-    $('#app').innerHTML=`<section class="library"><div class="hero"><div><div class="eyebrow">YOUR EVERYDAY ENGLISH, SLOWLY.</div><h1>把喜欢的视频，<br>听成<em>自己的英语。</em></h1><p class="intro">从一段日常开始。看见生活，听懂表达，<br>再把喜欢的那一句，变成你自己的声音。</p><div class="hero-note">Less rushing. More listening.</div></div><div class="new-card"><div class="new-card-top"><h3>收藏一个新故事</h3><span class="tiny-tag">LINKS & LOCAL STORIES</span></div><button class="url-starter" data-new>${icon('link')}<span>粘贴你想学习的视频链接</span><span class="arrow-box">↗</span></button><button class="local-starter" data-local>${icon('folder')}<span>导入本地英文视频<small>电影、访谈或课程，从原声重新识别</small></span><span>↗</span></button><button class="drop-zone" data-import><span class="folder-glyph">↳</span><span>或拖入一个素材包<small>选择整个文件夹，让学习接着发生</small></span></button></div></div><div id="jobs-area">${jobCards()}</div><div class="collection-heading"><div class="collection-title"><h2>我的素材库</h2><span class="count-badge">${num(state.packages.length)}</span></div><div class="collection-actions"><button class="text-button" data-refresh>${icon('replay')}刷新素材库</button><button class="button small" data-new>＋ 新建素材包</button></div></div><div class="library-grid">${state.packages.map(p=>`<button class="video-card" data-open="${esc(p.folder)}"><div class="card-image">${p.poster?`<img src="${media(p,p.poster)}" alt="${esc(p.title)}" loading="lazy">`:''}<span class="card-play">${icon('play')}</span><span class="duration">${fmt(p.duration)}</span></div><div class="card-body"><div class="creator">${esc(p.creator||'LOCAL COLLECTION')}</div><h3>${esc(p.title)}</h3><div class="card-meta"><span>${p.count} 个精听片段</span><span class="ready-pill">${p.count && p.analyzed===p.count?'讲解已就绪':p.analyzed?`${p.analyzed}/${p.count} 句已解析`:p.count?'英文字幕就绪':'待补充字幕'}</span></div></div></button>`).join('')}<button class="add-card" data-new><span class="plus">＋</span><span>下一段，听点什么？</span><small>让你喜欢的内容成为教材</small></button></div><p class="library-note">${icon('folder')}所有素材保存在本地。准备好一次，就可以练习很多次。</p></section>`;
-    $('#library-nav').classList.add('active');
-  }catch(e){toast(e.message);if(!state.packages.length)$('#app').innerHTML='<div class="empty">无法连接本地工具。请保持启动窗口打开，然后刷新页面。</div>';}
+const catalogKey=value=>String(value).normalize('NFKC').toLocaleLowerCase().trim().replace(/\s+/g,' ');
+const libraryView={query:'',category:'',tags:[],sort:'recent',expanded:false,data:null,revision:0,controller:null,timer:null,editing:null,busy:false};
+function libraryShell(){
+  $('#app').innerHTML=`<section class="library"><div class="hero"><div><div class="eyebrow">YOUR EVERYDAY ENGLISH, SLOWLY.</div><h1>把喜欢的视频，<br>听成<em>自己的英语。</em></h1><p class="intro">从一段日常开始。看见生活，听懂表达，<br>再把喜欢的那一句，变成你自己的声音。</p><div class="hero-note">Less rushing. More listening.</div></div><div class="new-card"><div class="new-card-top"><h3>收藏一个新故事</h3><span class="tiny-tag">LINKS & LOCAL STORIES</span></div><button class="url-starter" data-new>${icon('link')}<span>粘贴你想学习的视频链接</span><span class="arrow-box">↗</span></button><button class="local-starter" data-local>${icon('folder')}<span>导入本地英文视频<small>电影、访谈或课程，从原声重新识别</small></span><span>↗</span></button><button class="drop-zone" data-import><span class="folder-glyph">↳</span><span>或拖入一个素材包<small>选择整个文件夹，让学习接着发生</small></span></button></div></div><div id="jobs-area">${jobCards()}</div><div class="collection-heading"><div class="collection-title"><h2>我的素材库</h2><span class="count-badge" id="library-total">…</span></div><div class="collection-actions"><button class="text-button" data-refresh>${icon('replay')}刷新</button><button class="button small" data-new>＋ 新建素材包</button></div></div><section class="library-tools" aria-label="查找素材"><div class="library-search-row"><div class="search-box library-search">${icon('search')}<input id="library-search" type="search" maxlength="200" value="${esc(libraryView.query)}" placeholder="搜索标题、作者、标签或中英文字幕…" aria-label="搜索素材"></div><select id="library-sort" aria-label="素材排序"><option value="recent">最近添加</option><option value="relevance">相关程度</option><option value="title">标题 A–Z</option><option value="short">时长从短到长</option><option value="long">时长从长到短</option></select></div><div id="library-filters"></div><div class="library-results-line"><span id="library-result-count" role="status" aria-live="polite">正在整理素材…</span><button class="text-button" data-library-clear>清除筛选</button></div><p id="library-error" class="inline-error" role="alert"></p></section><div class="library-grid" id="library-results"></div><p class="library-note">${icon('folder')}所有素材保存在本地。分类与标签可以随时调整。</p></section>`;
+  $('#library-sort').value=libraryView.sort;
+  $('#library-search').oninput=e=>{const previous=libraryView.query;libraryView.query=e.target.value;libraryView.revision++;libraryView.controller?.abort();$('#library-result-count').textContent='正在查找…';if(!previous&&libraryView.query&&libraryView.sort==='recent'){libraryView.sort='relevance';$('#library-sort').value='relevance';}clearTimeout(libraryView.timer);libraryView.timer=setTimeout(loadLibrary,220);};
+  $('#library-sort').onchange=e=>{libraryView.sort=e.target.value;loadLibrary();};
 }
+async function loadLibrary(){
+  if(state.page!=='library')return;
+  if(!$('#library-results'))libraryShell();
+  const revision=++libraryView.revision;
+  libraryView.controller?.abort();libraryView.controller=new AbortController();
+  const query=new URLSearchParams({q:libraryView.query,category:libraryView.category,sort:libraryView.sort});libraryView.tags.forEach(tag=>query.append('tag',tag));
+  try{
+    const result=await api(`/api/library?${query}`,undefined,{signal:libraryView.controller.signal});
+    if(revision!==libraryView.revision||state.page!=='library')return;
+    state.packages=result.packages;libraryView.data=result;
+    $('#library-error').textContent='';$('#library-total').textContent=num(result.total);
+    renderLibraryFilters();renderLibraryResults();
+  }catch(e){if(e.name==='AbortError'||revision!==libraryView.revision||state.page!=='library')return;$('#library-error').innerHTML=`素材检索暂未完成。${esc(e.message)}<button class="text-button" data-refresh>重试检索</button>`;$('#library-result-count').textContent='检索失败';}
+}
+function renderLibraryFilters(){
+  const data=libraryView.data;if(!data||!$('#library-filters'))return;
+  const focused=document.activeElement,focusCategory=focused?.dataset.libraryCategory,focusTag=focused?.dataset.libraryTag;
+  const categories=[...data.categories],tags=[...data.tags];
+  if(libraryView.category&&!categories.some(c=>catalogKey(c.name)===catalogKey(libraryView.category)))categories.push({name:libraryView.category,count:0});
+  for(const name of libraryView.tags)if(!tags.some(t=>catalogKey(t.name)===catalogKey(name)))tags.push({name,count:0});
+  const shown=libraryView.expanded?tags:tags.filter((t,i)=>i<10||libraryView.tags.some(value=>catalogKey(value)===catalogKey(t.name)));
+  const html=`<div class="library-filter-row"><span class="filter-label">分类</span><div class="catalog-chips"><button class="catalog-chip" data-library-category="" aria-pressed="${!libraryView.category}">全部 <small>${data.total}</small></button>${categories.map(c=>`<button class="catalog-chip" data-library-category="${esc(c.name)}" aria-pressed="${catalogKey(libraryView.category)===catalogKey(c.name)}">${esc(c.name)} <small>${c.count}</small></button>`).join('')}</div></div><div class="library-filter-row"><span class="filter-label">标签</span><div class="catalog-chips">${shown.map(t=>`<button class="catalog-chip tag-chip" data-library-tag="${esc(t.name)}" aria-pressed="${libraryView.tags.some(value=>catalogKey(value)===catalogKey(t.name))}">${esc(t.name)} <small>${t.count}</small></button>`).join('')||'<span class="fine-print">整理素材后，标签会显示在这里。</span>'}${tags.length>10?`<button class="text-button" data-library-expand>${libraryView.expanded?'收起标签':`全部标签 · ${tags.length}`}</button>`:''}</div></div>`;
+  if($('#library-filters').innerHTML!==html){
+    $('#library-filters').innerHTML=html;
+    if(focusCategory!==undefined)Array.from($('#library-filters').querySelectorAll('[data-library-category]')).find(b=>b.dataset.libraryCategory===focusCategory)?.focus();
+    else if(focusTag!==undefined)Array.from($('#library-filters').querySelectorAll('[data-library-tag]')).find(b=>b.dataset.libraryTag===focusTag)?.focus();
+  }
+  $('#library-result-count').textContent=`${data.matched} / ${data.total} 份素材${libraryView.tags.length>1?' · 同时符合所选标签':''}`;
+  $('[data-library-clear]').hidden=!(libraryView.query||libraryView.category||libraryView.tags.length);
+}
+function renderLibraryResults(){
+  const data=libraryView.data;
+  $('#library-results').innerHTML=data.packages.map(p=>`<article class="video-card"><button class="card-open" data-open="${esc(p.folder)}" aria-label="学习 ${esc(p.title)}"><div class="card-image">${p.poster?`<img src="${media(p,p.poster)}" alt="" loading="lazy">`:''}<span class="card-play">${icon('play')}</span><span class="duration">${fmt(p.duration)}</span></div><div class="card-body"><div class="creator">${esc(p.creator||'LOCAL COLLECTION')}</div><h3>${esc(p.title)}</h3><div class="card-meta"><span>${p.count} 个精听片段</span><span class="ready-pill">${p.count&&p.analyzed===p.count?'讲解已就绪':p.analyzed?`${p.analyzed}/${p.count} 句已解析`:p.count?'英文字幕就绪':'待补充字幕'}</span></div></div></button><div class="card-organize"><button class="card-category" data-library-category="${esc(p.category)}">${esc(p.category)}</button><button class="text-button" data-organize="${esc(p.folder)}" aria-label="整理 ${esc(p.title)}">${icon('pen')}整理</button></div>${p.tags.length?`<div class="card-tags">${p.tags.slice(0,4).map(t=>`<button data-library-tag="${esc(t)}">${esc(t)}</button>`).join('')}${p.tags.length>4?`<span title="${esc(p.tags.join('，'))}">+${p.tags.length-4}</span>`:''}</div>`:''}${p.catalog_error?'<p class="catalog-warning">整理信息需要检查，请点击「整理」。</p>':''}${p.match?`<button class="catalog-match" data-library-match="${esc(p.folder)}"><span>字幕命中 · ${fmt(p.match.start)}${p.match_count>1?` · 共 ${p.match_count} 句`:''}</span><q lang="en">${esc(p.match.en)}</q>${p.match.zh?`<small>${esc(p.match.zh)}</small>`:''}<em>去听这一句 ↗</em></button>`:''}</article>`).join('')+(data.matched?'':`<div class="library-empty"><span>↳</span><h3>${data.total?'没有找到符合条件的素材':'收藏你的第一段故事'}</h3><p>${data.total?'换个关键词，或放宽分类与标签，试试再找一次。':'添加视频后，会自动获得来源、时长等标签。'}</p><button class="button small" ${data.total?'data-library-clear':'data-new'}>${data.total?'清除筛选':'制作学习素材包'}</button></div>`);
+}
+function setLibraryCategory(value){libraryView.category=value;loadLibrary();}
+function toggleLibraryTag(value){if(libraryView.tags.some(t=>catalogKey(t)===catalogKey(value)))libraryView.tags=libraryView.tags.filter(t=>catalogKey(t)!==catalogKey(value));else if(libraryView.tags.length<16)libraryView.tags.push(value);else return toast('最多同时筛选 16 个标签');loadLibrary();}
+function clearLibraryFilters(){libraryView.query='';libraryView.category='';libraryView.tags=[];$('#library-search').value='';clearTimeout(libraryView.timer);loadLibrary();}
+function openOrganization(folder){
+  const p=libraryView.data?.packages.find(p=>p.folder===folder);if(!p||libraryView.busy)return;
+  libraryView.editing=p;$('#catalog-title').textContent=p.title;$('#catalog-category').value=p.category;$('#catalog-tags').value=p.tags.join('，');
+  $('#catalog-categories').innerHTML=[...new Set([...libraryView.data.presets,...libraryView.data.categories.map(c=>c.name)])].map(name=>`<option value="${esc(name)}"></option>`).join('');
+  const suggestions=[...new Set([...p.suggested.tags,...libraryView.data.tags.map(t=>t.name)])].slice(0,18);
+  $('#catalog-suggestions').innerHTML=suggestions.map(tag=>`<button class="catalog-chip" type="button" data-catalog-suggest="${esc(tag)}">＋ ${esc(tag)}</button>`).join('');
+  $('#catalog-origin').textContent=p.automatic?'当前使用自动建议。你可以直接修改。':'当前使用你保存的分类和标签。自动更新不会覆盖它们。';
+  $('#catalog-error').textContent=p.catalog_error||'';$('#catalog-dialog').showModal();
+}
+async function saveOrganization(reset=false){
+  const p=libraryView.editing;if(!p||libraryView.busy)return;
+  libraryView.busy=true;$('#catalog-error').textContent='';$('#catalog-dialog').querySelectorAll('input,textarea,button').forEach(el=>el.disabled=true);
+  try{
+    const tags=$('#catalog-tags').value.split(/[,，;；\n]+/).map(t=>t.trim()).filter(Boolean);
+    await api('/api/library/organize',{folder:p.folder,package_id:p.id,...(reset?{reset:true}:{category:$('#catalog-category').value,tags})});
+    $('#catalog-dialog').close();await loadLibrary();toast(reset?'已恢复自动整理':'分类和标签已保存');
+  }catch(e){$('#catalog-error').textContent=e.message;}
+  finally{libraryView.busy=false;$('#catalog-dialog').querySelectorAll('input,textarea,button').forEach(el=>el.disabled=false);}
+}
+$('#catalog-form').onsubmit=e=>{e.preventDefault();saveOrganization();};
+$('#catalog-reset').onclick=()=>saveOrganization(true);
+$('#catalog-dialog').addEventListener('cancel',e=>{if(libraryView.busy)e.preventDefault();});
 
 async function openPackage(folder, target=null){
   const revision=++routeRevision;state.loading=true;setRoute(folder);const saved=await teardown();
@@ -621,6 +680,13 @@ document.addEventListener('click',async e=>{
     else if(b.hasAttribute('data-local'))showImport('local');
     else if(b.dataset.importMode)setImportMode(b.dataset.importMode);
     else if(b.hasAttribute('data-import'))$('#folder-input').click();
+    else if(b.hasAttribute('data-library-category'))setLibraryCategory(b.dataset.libraryCategory);
+    else if(b.hasAttribute('data-library-tag'))toggleLibraryTag(b.dataset.libraryTag);
+    else if(b.hasAttribute('data-library-clear'))clearLibraryFilters();
+    else if(b.hasAttribute('data-library-expand')){libraryView.expanded=!libraryView.expanded;renderLibraryFilters();}
+    else if(b.dataset.organize)openOrganization(b.dataset.organize);
+    else if(b.dataset.catalogSuggest){const input=$('#catalog-tags'),tags=input.value.split(/[,，;；\n]+/).map(t=>t.trim()).filter(Boolean);if(!tags.some(t=>t.toLocaleLowerCase()===b.dataset.catalogSuggest.toLocaleLowerCase()))tags.push(b.dataset.catalogSuggest);input.value=tags.join('，');input.focus();}
+    else if(b.dataset.libraryMatch){const p=libraryView.data?.packages.find(p=>p.folder===b.dataset.libraryMatch);if(p?.match)await openPackage(p.folder,{package_id:p.id,segment_id:p.match.id});}
     else if(b.hasAttribute('data-refresh')){await loadLibrary();toast('素材库已刷新');}
     else if(b.hasAttribute('data-home'))await home();
     else if(b.dataset.open)await openPackage(b.dataset.open);

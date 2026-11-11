@@ -14,8 +14,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
-from captions import read_cues, segment_cues
-from packages import ROOT, STATE, atomic_json, read_package, package_folder, save_package
+from captions import read_cues
+from packages import ROOT, STATE, atomic_json, read_package, package_folder, save_package, prepare_captions, has_captions
 import ai
 import transcribe as speech
 
@@ -82,14 +82,14 @@ def launch(kind, details):
                 else:
                     import local_media
                     folder, data = local_media.prepare(details["import_id"], STATE, job, run, ffmpeg_path())
-                if not data["segments"]:
+                if not has_captions(data):
                     transcribe(folder, data, job)
                 if details.get("analyze", True):
                     ai.analyze(folder, data, job, run)
             else:
                 folder = package_folder(details["folder"])
                 data = read_package(folder.name)
-                if not data["segments"]:
+                if not has_captions(data):
                     transcribe(folder, data, job)
                 ai.analyze(folder, data, job, run, upgrade=details.get("upgrade", False), segment_id=details.get("segment_id"))
             job.check()
@@ -280,7 +280,7 @@ def download(job):
         data = read_package(folder_name)
         job.update(folder=folder_name)
         if job.data.get("analyze", True):
-            if not data["segments"]:
+            if not has_captions(data):
                 transcribe(folder, data, job)
             ai.analyze(folder, data, job, run)
         return
@@ -303,7 +303,7 @@ def download(job):
         run([ffmpeg_path(), "-y", "-i", str(source), *codec, "-movflags", "+faststart", str(temp)], job, quiet=True)
         temp.replace(destination)
     lang, caption_source = choose_subtitle(info)
-    segments = []
+    caption_data = prepare_captions({}, [])
     notice = ""
     if lang:
         job.update(message="正在整理英文字幕和语句时间轴…", progress=58)
@@ -313,14 +313,15 @@ def download(job):
             if files:
                 caption = files[0]
                 shutil.copy2(caption, folder / f"original{caption.suffix}")
-                segments = segment_cues(read_cues(caption))
+                caption_data = prepare_captions({}, read_cues(caption))
         except Cancelled:
             raise
         except Exception:
             notice = "字幕下载失败，视频已保存。可导入英文 SRT/VTT 字幕，或安装本地转写组件后重试。"
     data = {"schema_version": 1, "id": identifier, "title": title, "creator": info.get("uploader", ""), "source_url": url,
-            "duration": info.get("duration", 0), "video": "video.mp4", "poster": "", "segments": segments,
-            "created_at": datetime.now(timezone.utc).isoformat(), "status": "captions_ready" if segments else "needs_captions", "caption_source": caption_source, "notice": notice}
+            "duration": info.get("duration", 0), "video": "video.mp4", "poster": "",
+            "created_at": datetime.now(timezone.utc).isoformat(), "caption_source": caption_source, "notice": notice, **caption_data}
+    data["status"] = "captions_ready" if has_captions(data) else "needs_captions"
     try:
         run([ffmpeg_path(), "-y", "-ss", str(min(35, data["duration"] / 3)), "-i", str(destination), "-frames:v", "1", "-vf", "scale=960:-2", str(folder / "poster.jpg")], job, quiet=True, timeout=60)
         data["poster"] = "poster.jpg"
@@ -332,7 +333,7 @@ def download(job):
     # The package is now self-contained; retain only small source metadata in staging.
     for p in videos:
         p.unlink(missing_ok=True)
-    if not segments:
+    if not has_captions(data):
         transcribe(folder, data, job)
     if job.data.get("analyze", True):
         ai.analyze(folder, data, job, run)
@@ -345,8 +346,8 @@ def transcribe(folder, data, job):
     output = STATE / "transcripts" / f"{data['id']}.json"
     output.parent.mkdir(parents=True, exist_ok=True)
     run([sys.executable, str(Path(__file__).parent / "transcribe.py"), str(folder / data["video"]), str(output)], job, quiet=True, timeout=12 * 3600)
-    data["segments"] = segment_cues(json.loads(output.read_text("utf8")))
-    if not data["segments"]:
+    prepare_captions(data, json.loads(output.read_text("utf8")))
+    if not has_captions(data):
         raise RuntimeError("没有识别到英文语音，请导入英文字幕")
     metadata = json.loads(output.with_suffix(".metadata.json").read_text("utf8"))
     data.update(caption_source="本地原音识别 · " + metadata["model"], transcription=metadata, status="captions_ready", notice="字幕由本地英文语音识别生成，未使用随附字幕；音乐、重叠对白和专有名词可能识别有误，请结合原声核对。")

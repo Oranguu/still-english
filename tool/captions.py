@@ -4,6 +4,107 @@ import json
 import re
 from pathlib import Path
 
+SEGMENTATION_VERSION = 2
+SHORT_WORD_LIMIT = 4
+MERGE_MAX_GAP = 1.5
+MERGE_MAX_SECONDS = 13
+MERGE_MAX_WORDS = 40
+
+# These expressions can stay in the full subtitles without each becoming a
+# separate listening exercise, even when several responses exceed four words.
+_FILLER_WORDS = frozenset({
+    "yes", "yeah", "yep", "yup", "no", "nope", "nah", "okay", "ok", "alright",
+    "right", "well", "uh", "um", "erm", "er", "ah", "oh", "hmm", "hm", "mm",
+    "mmm", "mhm", "wow", "hey", "hi", "hello", "bye", "goodbye", "thanks",
+    "sorry", "sure", "indeed", "oops", "whoa", "huh", "hurray", "hooray",
+})
+_FILLER_PHRASES = tuple(tuple(phrase.split()) for phrase in (
+    "thank you", "thank you very much", "thank you so much", "thanks a lot",
+    "thanks very much", "thanks so much", "thank you all", "thank you both",
+    "thank you guys", "thanks guys", "thank you sir", "thank you ma'am",
+    "excuse me", "so sorry", "very sorry", "i'm sorry", "i am sorry",
+    "i'm so sorry", "i am so sorry", "i'm really sorry", "i am really sorry",
+    "you're welcome", "you are welcome", "all right", "no problem", "not a problem",
+    "of course", "uh huh", "mm hmm", "hi there",
+    "good morning", "good afternoon", "good evening", "good night", "hello there",
+    "see you", "see ya", "see you later", "oh my god", "oh god", "my god",
+))
+
+
+def _words(text):
+    return re.findall(r"[a-z]+(?:'[a-z]+)?|\d+(?:[.,]\d+)*", text.lower().replace("’", "'"))
+
+
+def is_low_information(text):
+    """True only when the complete text consists of known short responses."""
+    words = _words(text)
+    if not words:
+        return False
+    reachable = {0}
+    for position in range(len(words)):
+        if position not in reachable:
+            continue
+        if words[position] in _FILLER_WORDS:
+            reachable.add(position + 1)
+        for phrase in _FILLER_PHRASES:
+            if tuple(words[position:position + len(phrase)]) == phrase:
+                reachable.add(position + len(phrase))
+    return len(words) in reachable
+
+
+def _short(group):
+    return len(_words(group["en"])) <= SHORT_WORD_LIMIT or is_low_information(group["en"])
+
+
+def _fits(left, right):
+    return (0 <= right["start"] - left["end"] <= MERGE_MAX_GAP
+            and right["end"] - left["start"] <= MERGE_MAX_SECONDS
+            and len(_words(left["en"])) + len(_words(right["en"])) <= MERGE_MAX_WORDS)
+
+
+def _join(left, right):
+    return {"members": left["members"] + right["members"], "start": left["start"],
+            "end": right["end"], "en": left["en"] + " " + right["en"]}
+
+
+def group_learning_segments(segments):
+    """Return original-index groups and skipped indices without changing input.
+
+    Input must be chronological, non-overlapping source segments. Short speech
+    preferentially joins the following nearby speech, then the preceding group
+    when no forward merge fits. Groups of four words or fewer, and groups made
+    entirely of known filler expressions, remain only in the full subtitles if
+    they cannot join useful speech. Bounds describe timing, not speaker or scene
+    recognition; a short question, name or number is never joined across a long
+    pause just to meet the exercise length threshold.
+    """
+    current = [{"members": [i], "start": s["start"], "end": s["end"], "en": s["en"]}
+               for i, s in enumerate(segments)]
+    skipped = []
+    # Removing filler-only groups can expose another safe neighbor. Finish that
+    # work now so applying the same rule again cannot keep changing boundaries.
+    while current:
+        result = []
+        index = 0
+        while index < len(current):
+            group = current[index]
+            index += 1
+            if _short(group):
+                while index < len(current) and _short(group) and _fits(group, current[index]):
+                    group = _join(group, current[index])
+                    index += 1
+                if _short(group) and result and _fits(result[-1], group):
+                    group = _join(result.pop(), group)
+            if _short(group):
+                skipped.extend(group["members"])
+            else:
+                result.append(group)
+        if len(result) == len(current):
+            current = result
+            break
+        current = result
+    return {"groups": [group["members"] for group in current], "skipped": sorted(skipped)}
+
 
 def clean(text):
     text = re.sub(r"♪[^♪]*♪", "", text)
@@ -55,8 +156,12 @@ def read_cues(path):
     return [c for c in cues if c["text"] and c["end"] > c["start"]]
 
 
-def segment_cues(cues):
-    """Use source timings; merge short cues at punctuation, pauses, or ~12 seconds."""
+def segment_cues(cues, *, compact=True):
+    """Normalize timings, then group short speech into useful listening units.
+
+    compact=False retains the original subtitle units, including small replies,
+    so callers can keep complete, accurately timed full-playback subtitles.
+    """
     normalized = []
     for cue in sorted(cues, key=lambda c: c["start"]):
         cue = dict(cue)
@@ -98,7 +203,15 @@ def segment_cues(cues):
         group["start"] = round(group["start"], 3)
         group["end"] = round(group["end"], 3)
         result.append(group)
-    return result
+    if not compact:
+        return result
+    grouped = []
+    for members in group_learning_segments(result)["groups"]:
+        parts = [result[i] for i in members]
+        grouped.append({"id": f"s{len(grouped) + 1:04}", "start": parts[0]["start"],
+                        "end": parts[-1]["end"], "en": " ".join(s["en"] for s in parts),
+                        "zh": "", "analysis": None, "source_ids": [s["id"] for s in parts]})
+    return grouped
 
 
 def vtt(segments, bilingual=False):

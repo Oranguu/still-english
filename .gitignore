@@ -19,6 +19,7 @@
 !/tool/local_media.py
 !/tool/packages.py
 !/tool/reviews.py
+!/tool/regroup.py
 !/tool/requirements.txt
 !/tool/server.py
 !/tool/setup.py
@@ -43,6 +44,8 @@
 !/tool/tests/test_listening.py
 !/tool/tests/test_local_media.py
 !/tool/tests/test_catalog.py
+!/tool/tests/test_regroup.py
+!/tool/tests/test_playback_captions.py
 /tool/scripts/*
 !/tool/scripts/check_public_files.py
 

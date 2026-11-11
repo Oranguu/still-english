@@ -5,7 +5,7 @@ import re
 import tempfile
 import threading
 from pathlib import Path
-from captions import vtt
+from captions import SEGMENTATION_VERSION, segment_cues, vtt
 
 TOOL = Path(__file__).resolve().parent
 ROOT = TOOL.parent
@@ -41,6 +41,50 @@ def safe_path(base, relative):
     return path
 
 
+def _validate_segments(items):
+    if not isinstance(items, list) or len(items) > 20000:
+        raise ValueError("语句列表格式无效")
+    ids, last = set(), -1
+    for s in items:
+        if not isinstance(s, dict) or not isinstance(s.get("id"), str) or not s["id"].strip() or s["id"] in ids:
+            raise ValueError("语句编号缺失或重复")
+        ids.add(s["id"])
+        start, end = s.get("start"), s.get("end")
+        if not all(isinstance(t, (int, float)) and not isinstance(t, bool) and math.isfinite(t) for t in (start, end)) or start < 0 or end <= start or start < last:
+            raise ValueError("语句时间轴无效或重叠")
+        if not isinstance(s.get("en"), str) or not s["en"].strip() or not isinstance(s.get("zh", ""), str):
+            raise ValueError("语句内容无效")
+        if s.get("analysis") is not None and not isinstance(s["analysis"], dict):
+            raise ValueError("讲解格式无效")
+        last = end
+
+
+def _validate_captions(data):
+    _validate_segments(data.get("segments"))
+    raw = data.get("subtitle_segments")
+    if "subtitle_segments" in data:
+        _validate_segments(raw)
+    source_positions = {s["id"]: i for i, s in enumerate(raw or [])}
+    used = set()
+    for segment in data["segments"]:
+        if "source_ids" not in segment:
+            continue
+        refs = segment["source_ids"]
+        if not isinstance(refs, list) or not refs or len(refs) > len(source_positions):
+            raise ValueError("语句的原始字幕引用无效")
+        positions = []
+        for ref in refs:
+            if not isinstance(ref, str) or ref not in source_positions or ref in used:
+                raise ValueError("语句的原始字幕引用不存在或重复")
+            used.add(ref)
+            positions.append(source_positions[ref])
+        if positions != sorted(positions):
+            raise ValueError("语句的原始字幕顺序无效")
+        if not (math.isclose(segment["start"], raw[positions[0]]["start"], abs_tol=1e-6, rel_tol=0)
+                and math.isclose(segment["end"], raw[positions[-1]]["end"], abs_tol=1e-6, rel_tol=0)):
+            raise ValueError("语句与原始字幕时间范围不一致")
+
+
 def validate(data, folder=None):
     if not isinstance(data, dict) or data.get("schema_version") != 1:
         raise ValueError("不支持的素材包格式，需要 schema_version: 1")
@@ -57,30 +101,63 @@ def validate(data, folder=None):
             poster = safe_path(folder, data["poster"])
             if poster.suffix.lower() not in (".jpg", ".jpeg", ".png", ".webp") or not poster.is_file():
                 raise ValueError("封面路径无效")
-    items = data.get("segments")
-    if not isinstance(items, list) or len(items) > 20000:
-        raise ValueError("语句列表格式无效")
-    ids, last = set(), -1
-    for s in items:
-        if not isinstance(s, dict) or not isinstance(s.get("id"), str) or s["id"] in ids:
-            raise ValueError("语句编号缺失或重复")
-        ids.add(s["id"])
-        start, end = s.get("start"), s.get("end")
-        if not all(isinstance(t, (int, float)) and not isinstance(t, bool) and math.isfinite(t) for t in (start, end)) or start < 0 or end <= start or start < last:
-            raise ValueError("语句时间轴无效或重叠")
-        if not isinstance(s.get("en"), str) or not s["en"].strip() or not isinstance(s.get("zh", ""), str):
-            raise ValueError("语句内容无效")
-        if s.get("analysis") is not None and not isinstance(s["analysis"], dict):
-            raise ValueError("讲解格式无效")
-        last = end
+    _validate_captions(data)
     return data
+
+
+def prepare_captions(data, cues):
+    """Keep complete subtitles separately from the compact learning exercises."""
+    cues = list(cues)
+    raw = segment_cues(cues, compact=False)
+    data.update(subtitle_segments=[{key: s[key] for key in ("id", "start", "end", "en", "zh")} for s in raw],
+                segments=segment_cues(cues), segmentation_version=SEGMENTATION_VERSION)
+    _validate_captions(data)
+    return data
+
+
+def has_captions(data):
+    """A filler-only video can have complete subtitles and no study exercises."""
+    return bool(data.get("subtitle_segments", data.get("segments", [])))
+
+
+def playback_segments(data):
+    """Prefer original timed translations; use new group translations as a unit."""
+    _validate_captions(data)
+    if "subtitle_segments" not in data:
+        return data["segments"]
+    raw = data["subtitle_segments"]
+    positions = {s["id"]: i for i, s in enumerate(raw)}
+    replacements = {}
+    for segment in data["segments"]:
+        refs = segment.get("source_ids", [])
+        if not refs or not segment.get("zh", "").strip():
+            continue
+        indices = [positions[ref] for ref in refs]
+        # A skipped original cue inside the span must remain visible. Likewise,
+        # existing precise translations must never be replaced by a longer one.
+        if indices != list(range(indices[0], indices[-1] + 1)) or any(raw[i].get("zh", "").strip() for i in indices):
+            continue
+        replacements[indices[0]] = (indices[-1], {"id": raw[indices[0]]["id"],
+                                                **{key: segment[key] for key in ("start", "end", "en", "zh")}})
+    result = []
+    index = 0
+    while index < len(raw):
+        if index in replacements:
+            end, segment = replacements[index]
+            result.append(segment)
+            index = end + 1
+        else:
+            result.append(raw[index])
+            index += 1
+    return result
 
 
 def save_package(folder, data):
     validate(data, folder)
+    subtitles = playback_segments(data)
     atomic_json(folder / "manifest.json", data)
-    (folder / "english.vtt").write_text(vtt(data["segments"]), encoding="utf8")
-    (folder / "bilingual.vtt").write_text(vtt(data["segments"], True), encoding="utf8")
+    (folder / "english.vtt").write_text(vtt(subtitles), encoding="utf8")
+    (folder / "bilingual.vtt").write_text(vtt(subtitles, True), encoding="utf8")
 
 
 def library_root():
@@ -136,7 +213,7 @@ def list_packages():
             continue
         try:
             data = read_package(folder.name)
-            result.append({k: data.get(k) for k in ("id", "title", "creator", "duration", "poster", "status", "created_at", "source_url", "caption_source", "notice") } | {"folder": folder.name, "count": len(data["segments"]), "analyzed": sum(bool(s.get("analysis")) for s in data["segments"]), "detailed": sum(isinstance(s.get("analysis_version"), (int, float)) and not isinstance(s.get("analysis_version"), bool) and s["analysis_version"] >= 2 for s in data["segments"])})
+            result.append({k: data.get(k) for k in ("id", "title", "creator", "duration", "poster", "status", "created_at", "source_url", "caption_source", "notice") } | {"folder": folder.name, "count": len(data["segments"]), "caption_count": len(data.get("subtitle_segments", data["segments"])), "analyzed": sum(bool(s.get("analysis")) for s in data["segments"]), "detailed": sum(isinstance(s.get("analysis_version"), (int, float)) and not isinstance(s.get("analysis_version"), bool) and s["analysis_version"] >= 2 for s in data["segments"])})
         except (OSError, ValueError, TypeError, KeyError):
             continue
     return result

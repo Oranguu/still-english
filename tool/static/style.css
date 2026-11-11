@@ -32,3 +32,5 @@ dialog{background:var(--paper);border:1px solid var(--line);border-radius:12px;b
 .guide-library-note{font-size:12px;line-height:1.9;color:var(--muted);margin:18px 0;padding:14px 16px;border-left:2px solid #b5bea2;background:var(--wash)}
 
 #catalog-dialog{max-height:calc(100vh - 32px);max-height:calc(100dvh - 32px);overflow:auto}#library-error .text-button{margin-left:8px}
+
+.combined-lesson{white-space:pre-line}

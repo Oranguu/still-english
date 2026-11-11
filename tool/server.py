@@ -19,8 +19,8 @@ import jobs
 import listening
 import local_media
 import reviews
-from captions import read_cues, segment_cues
-from packages import TOOL, ROOT, STATE, atomic_json, safe_path, validate, list_packages, read_package, package_folder, save_package, library_root, migrate_library
+from captions import read_cues
+from packages import TOOL, ROOT, STATE, atomic_json, safe_path, validate, list_packages, read_package, package_folder, save_package, library_root, migrate_library, prepare_captions, playback_segments, has_captions
 
 TOKEN = secrets.token_urlsafe(32)
 IMPORTS = {}
@@ -90,7 +90,7 @@ class Handler(BaseHTTPRequestHandler):
             path = unquote(parsed.path)
             query = parse_qs(parsed.query)
             if path == "/api/status":
-                return self.reply({"token": TOKEN, "ai": ai.auth_status(), "root": str(ROOT), "version": "1.6.0", "transcription": bool(jobs.speech.backend())})
+                return self.reply({"token": TOKEN, "ai": ai.auth_status(), "root": str(ROOT), "version": "1.7.0", "transcription": bool(jobs.speech.backend())})
             if path == "/api/library":
                 return self.reply(catalog.library(STATE, query.get("q", [""])[0], query.get("category", [""])[0], query.get("tag", []), query.get("sort", ["recent"])[0]))
             if path == "/api/packages":
@@ -104,7 +104,7 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/package":
                 folder = query.get("folder", [""])[0]
                 data = read_package(folder)
-                return self.reply(data | {"folder": folder})
+                return self.reply(data | {"folder": folder, "playback_segments": playback_segments(data)})
             if path == "/api/progress":
                 return self.reply(reviews.read_progress(query.get("folder", [""])[0], STATE))
             if path.startswith("/media/"):
@@ -147,15 +147,15 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/captions":
                 folder = package_folder(query.get("folder", [""])[0])
                 data = read_package(folder.name)
-                if data["segments"]:
+                if has_captions(data):
                     raise ValueError("此素材包已有字幕，替换字幕会改变学习进度；请在副本中编辑")
                 ext = query.get("ext", [".vtt"])[0]
                 if ext not in (".srt", ".vtt", ".json3"):
                     raise ValueError("请选择英文 SRT、VTT 或 JSON3 字幕")
                 target = folder / ("original" + ext)
                 target.write_bytes(self.body())
-                data["segments"] = segment_cues(read_cues(target))
-                if not data["segments"]:
+                prepare_captions(data, read_cues(target))
+                if not has_captions(data):
                     raise ValueError("没有找到可用的英文字幕")
                 data.update(status="captions_ready", caption_source="手动导入的英文字幕", notice="")
                 save_package(folder, data)

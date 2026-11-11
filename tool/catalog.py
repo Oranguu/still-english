@@ -132,7 +132,7 @@ def indexed(folder):
     data = packages.read_package(folder.name)
     fields = ("id", "title", "creator", "duration", "video", "poster", "status", "created_at", "source_url", "source_kind", "caption_source", "notice")
     row = {k: data.get(k) for k in fields}
-    row.update(folder=folder.name, count=len(data["segments"]), analyzed=sum(bool(s.get("analysis")) for s in data["segments"]), suggested=defaults(data))
+    row.update(folder=folder.name, count=len(data["segments"]), caption_count=len(data.get("subtitle_segments", data["segments"])), analyzed=sum(bool(s.get("analysis")) for s in data["segments"]), suggested=defaults(data))
     segments = [{"id": s["id"], "start": s["start"], "en": s["en"], "zh": s.get("zh", ""), "search": normalize(s["en"] + " " + s.get("zh", ""))} for s in data["segments"]]
     CACHE[key] = (signature, row, segments)
     while len(CACHE) > 128:

@@ -187,6 +187,7 @@ def analyze(folder, data, job, run, upgrade=False, segment_id=None):
             # especially one the learner has already upgraded or annotated.
             if upgrade or not original.get("analysis"):
                 original.update(analysis=row["analysis"], analysis_version=version)
+                original.pop("analysis_origin", None)
             original["zh"] = row["zh"]
         updated["status"] = "ready" if all(s.get("analysis") and s.get("zh") for s in updated["segments"]) else "partial"
         updated["analysis_source"] = "Codex · ChatGPT 登录"

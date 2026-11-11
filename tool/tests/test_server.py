@@ -151,5 +151,21 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(self.post('/api/analyze',{'folder':'sample','upgrade':'yes'})[0],400)
             self.assertEqual(self.post('/api/analyze',{'folder':'sample','segment_id':'missing'})[0],400)
 
+    def test_local_video_copy_routes_and_optional_analysis(self):
+        data={'name':'Synthetic_movie.mp4','size':11,'analyze':False}
+        self.assertEqual(self.request('POST','/api/local/start',json.dumps(data))[0],403)
+        self.assertEqual(self.post('/api/local/start',data|{'name':'../private.mp4'})[0],400)
+        status,_,raw=self.post('/api/local/start',data);self.assertEqual(status,200)
+        identifier=json.loads(raw)['id']
+        self.assertEqual(self.post('/api/local/finish',{'id':identifier})[0],400)
+        endpoint=f'/api/local/file?id={identifier}'
+        self.assertEqual(self.request('POST',endpoint,b'hello movie')[0],403)
+        self.assertEqual(self.request('POST',endpoint,b'hello movie',{'X-Local-Token':server.TOKEN})[0],200)
+        with patch.object(server.jobs,'launch',return_value={'status':'queued'}) as launch:
+            self.assertEqual(self.post('/api/local/finish',{'id':identifier,'analyze':False})[0],202)
+            launch.assert_called_once_with('local',{'import_id':identifier,'analyze':False})
+        self.assertEqual(self.post('/api/local/finish',{'id':identifier,'analyze':'false'})[0],400)
+        self.assertEqual(self.post('/api/local/resume',{'folder':'sample'})[0],400)
+
 
 if __name__=='__main__':unittest.main()

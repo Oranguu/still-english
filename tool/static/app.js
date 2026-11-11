@@ -35,7 +35,7 @@ async function api(path, data, options={}){
 }
 const media = (pkg, path) => `/media/${encodeURIComponent(pkg.folder)}/${path.split('/').map(encodeURIComponent).join('/')}`;
 const current = () => state.pkg?.segments[state.current];
-function showImport(){ $('#download-error').textContent='';$('#import-dialog').showModal();setTimeout(()=>$('#video-url').focus(),30); }
+function showImport(mode='url'){ $('#download-error').textContent='';if(!localVideo&&!localCopyBusy){$('#local-copy-status').textContent='';$('#local-import-error').textContent='';}setImportMode(mode);if(!$('#import-dialog').open)$('#import-dialog').showModal();if(mode==='url')setTimeout(()=>$('#video-url').focus(),30); }
 async function teardown(){
   stopListening();
   if(teardownPending)return teardownPending;
@@ -60,7 +60,7 @@ async function loadLibrary(){
   try{
     const result=await api('/api/packages');state.packages=result.packages;
     if(state.page!=='library')return;
-    $('#app').innerHTML=`<section class="library"><div class="hero"><div><div class="eyebrow">YOUR EVERYDAY ENGLISH, SLOWLY.</div><h1>把喜欢的视频，<br>听成<em>自己的英语。</em></h1><p class="intro">从一段日常开始。看见生活，听懂表达，<br>再把喜欢的那一句，变成你自己的声音。</p><div class="hero-note">Less rushing. More listening.</div></div><div class="new-card"><div class="new-card-top"><h3>收藏一个新故事</h3><span class="tiny-tag">YOUTUBE / BILIBILI</span></div><button class="url-starter" data-new>${icon('link')}<span>粘贴你想学习的视频链接</span><span class="arrow-box">↗</span></button><button class="drop-zone" data-import><span class="folder-glyph">↳</span><span>或拖入一个素材包<small>选择整个文件夹，让学习接着发生</small></span></button></div></div><div id="jobs-area">${jobCards()}</div><div class="collection-heading"><div class="collection-title"><h2>我的素材库</h2><span class="count-badge">${num(state.packages.length)}</span></div><div class="collection-actions"><button class="text-button" data-refresh>${icon('replay')}刷新素材库</button><button class="button small" data-new>＋ 新建素材包</button></div></div><div class="library-grid">${state.packages.map(p=>`<button class="video-card" data-open="${esc(p.folder)}"><div class="card-image">${p.poster?`<img src="${media(p,p.poster)}" alt="${esc(p.title)}" loading="lazy">`:''}<span class="card-play">${icon('play')}</span><span class="duration">${fmt(p.duration)}</span></div><div class="card-body"><div class="creator">${esc(p.creator||'LOCAL COLLECTION')}</div><h3>${esc(p.title)}</h3><div class="card-meta"><span>${p.count} 个精听片段</span><span class="ready-pill">${p.count && p.analyzed===p.count?'讲解已就绪':p.analyzed?`${p.analyzed}/${p.count} 句已解析`:p.count?'英文字幕就绪':'待补充字幕'}</span></div></div></button>`).join('')}<button class="add-card" data-new><span class="plus">＋</span><span>下一段，听点什么？</span><small>让你喜欢的内容成为教材</small></button></div><p class="library-note">${icon('folder')}所有素材保存在本地。准备好一次，就可以练习很多次。</p></section>`;
+    $('#app').innerHTML=`<section class="library"><div class="hero"><div><div class="eyebrow">YOUR EVERYDAY ENGLISH, SLOWLY.</div><h1>把喜欢的视频，<br>听成<em>自己的英语。</em></h1><p class="intro">从一段日常开始。看见生活，听懂表达，<br>再把喜欢的那一句，变成你自己的声音。</p><div class="hero-note">Less rushing. More listening.</div></div><div class="new-card"><div class="new-card-top"><h3>收藏一个新故事</h3><span class="tiny-tag">LINKS & LOCAL STORIES</span></div><button class="url-starter" data-new>${icon('link')}<span>粘贴你想学习的视频链接</span><span class="arrow-box">↗</span></button><button class="local-starter" data-local>${icon('folder')}<span>导入本地英文视频<small>电影、访谈或课程，从原声重新识别</small></span><span>↗</span></button><button class="drop-zone" data-import><span class="folder-glyph">↳</span><span>或拖入一个素材包<small>选择整个文件夹，让学习接着发生</small></span></button></div></div><div id="jobs-area">${jobCards()}</div><div class="collection-heading"><div class="collection-title"><h2>我的素材库</h2><span class="count-badge">${num(state.packages.length)}</span></div><div class="collection-actions"><button class="text-button" data-refresh>${icon('replay')}刷新素材库</button><button class="button small" data-new>＋ 新建素材包</button></div></div><div class="library-grid">${state.packages.map(p=>`<button class="video-card" data-open="${esc(p.folder)}"><div class="card-image">${p.poster?`<img src="${media(p,p.poster)}" alt="${esc(p.title)}" loading="lazy">`:''}<span class="card-play">${icon('play')}</span><span class="duration">${fmt(p.duration)}</span></div><div class="card-body"><div class="creator">${esc(p.creator||'LOCAL COLLECTION')}</div><h3>${esc(p.title)}</h3><div class="card-meta"><span>${p.count} 个精听片段</span><span class="ready-pill">${p.count && p.analyzed===p.count?'讲解已就绪':p.analyzed?`${p.analyzed}/${p.count} 句已解析`:p.count?'英文字幕就绪':'待补充字幕'}</span></div></div></button>`).join('')}<button class="add-card" data-new><span class="plus">＋</span><span>下一段，听点什么？</span><small>让你喜欢的内容成为教材</small></button></div><p class="library-note">${icon('folder')}所有素材保存在本地。准备好一次，就可以练习很多次。</p></section>`;
     $('#library-nav').classList.add('active');
   }catch(e){toast(e.message);if(!state.packages.length)$('#app').innerHTML='<div class="empty">无法连接本地工具。请保持启动窗口打开，然后刷新页面。</div>';}
 }
@@ -502,7 +502,7 @@ async function pollJobs(){
       const before=state.jobSignature;state.jobSignature=signature;
       if(state.page==='library'){
         if($('#jobs-area'))$('#jobs-area').innerHTML=jobCards();
-        if(before&&state.jobs.some(j=>j.status==='complete'))await loadLibrary();
+        if(before&&state.jobs.some(j=>j.status==='complete'||(j.folder&&!state.packages.some(p=>p.folder===j.folder))))await loadLibrary();
       }else if(state.page==='study'&&state.pkg){
         const folder=state.pkg.folder;
         const matching=state.jobs.find(j=>j.folder===state.pkg.folder&&['running','queued'].includes(j.status));
@@ -525,10 +525,51 @@ async function pollJobs(){
   }catch{/* Server may be restarting. Preserve the active lesson. */}
 }
 
+let localVideo=null,localUpload=null,localCopyBusy=false;
+function setImportMode(mode){
+  if(localCopyBusy)return;
+  $('#download-form').hidden=mode==='local';$('#local-video-form').hidden=mode!=='local';
+  document.querySelectorAll('[data-import-mode]').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.importMode===mode)));
+}
+function chooseLocalVideo(file){
+  if(localCopyBusy){toast('正在复制视频，请等待完成');return;}
+  localUpload=null;showImport('local');$('#local-import-error').textContent='';$('#local-copy-status').textContent='';
+  if(!/\.(mp4|m4v|mov|mkv|webm|avi)$/i.test(file.name)||!file.size||file.size>32*1024**3){localVideo=null;$('#local-file-name').textContent='选择一个英文视频';$('#local-import-error').textContent='请选择 32 GB 以内的 MP4、MOV、MKV、WebM、M4V 或 AVI 视频';return;}
+  localVideo=file;$('#local-file-name').textContent=`${file.name} · ${file.size>=1024**3?(file.size/1024**3).toFixed(2)+' GB':(file.size/1024**2).toFixed(1)+' MB'}`;
+}
+function copyLocalVideo(id,file){
+  return new Promise((resolve,reject)=>{
+    const xhr=new XMLHttpRequest();xhr.open('POST',`/api/local/file?id=${encodeURIComponent(id)}`);
+    xhr.setRequestHeader('X-Local-Token',state.token);xhr.setRequestHeader('Content-Type','application/octet-stream');
+    xhr.upload.onprogress=e=>{if(e.lengthComputable){const percent=Math.min(99,Math.round(e.loaded/e.total*100));$('#local-copy-progress').value=percent;$('#local-copy-status').textContent=`正在复制到本地素材库 · ${percent}%`;}};
+    xhr.onerror=()=>reject(new Error('本地连接中断，请重新选择视频；原文件未改动'));
+    xhr.onabort=()=>reject(new Error('复制已停止，原文件未改动'));
+    xhr.onload=()=>{try{const result=JSON.parse(xhr.responseText);if(xhr.status<200||xhr.status>=300)throw new Error(result.error||'复制失败');resolve(result);}catch(error){reject(error);}};
+    xhr.send(file);
+  });
+}
+$('#local-video-picker').onclick=()=>$('#local-video-input').click();
+$('#local-video-input').onchange=e=>{if(e.target.files[0])chooseLocalVideo(e.target.files[0]);e.target.value='';};
+$('#import-dialog').addEventListener('cancel',e=>{if(localCopyBusy)e.preventDefault();});
+$('#local-video-form').onsubmit=async e=>{
+  e.preventDefault();if(localCopyBusy)return;
+  if(!localVideo){$('#local-import-error').textContent='先选择一个本地英文视频';return;}
+  localCopyBusy=true;const controls=[...document.querySelectorAll('#import-dialog button, #local-auto-ai')];controls.forEach(b=>b.disabled=true);
+  $('#local-import-error').textContent='';$('#local-copy-progress').hidden=false;$('#local-copy-progress').value=0;
+  try{
+    if(!localUpload){localUpload=await api('/api/local/start',{name:localVideo.name,size:localVideo.size,analyze:$('#local-auto-ai').checked});}
+    if(!localUpload.copied){await copyLocalVideo(localUpload.id,localVideo);localUpload.copied=true;}$('#local-copy-progress').value=100;$('#local-copy-status').textContent='副本已保存，正在开始识别…';
+    await api('/api/local/finish',{id:localUpload.id,analyze:$('#local-auto-ai').checked});$('#import-dialog').close();localVideo=null;localUpload=null;$('#local-file-name').textContent='选择一个英文视频';$('#local-copy-status').textContent='';
+    await home();await pollJobs();toast('视频副本已保存，正在从原音制作素材包。原文件保持不变。');
+  }catch(error){$('#local-import-error').textContent=error.message;if(localUpload?.copied)$('#local-copy-status').textContent='视频副本已保存，再次点击制作即可继续，无需重新复制。';else localUpload=null;}
+  finally{localCopyBusy=false;controls.forEach(b=>b.disabled=false);$('#local-copy-progress').hidden=true;}
+};
+
 async function importFiles(entries){
   if(!entries.length)return;
   const manifests=entries.filter(e=>e.path.split('/').pop()==='manifest.json');
-  if(manifests.length!==1){toast('请选择一个包含 manifest.json 的完整素材包文件夹');return;}
+  if(!manifests.length){const videos=entries.filter(entry=>/\.(mp4|m4v|mov|mkv|webm|avi)$/i.test(entry.file.name));if(videos.length===1){chooseLocalVideo(videos[0].file);return;}toast('请拖入一个本地视频，或一个完整的素材包文件夹');return;}
+  if(manifests.length!==1){toast('请一次导入一个素材包');return;}
   const manifestEntry=manifests[0],prefix=manifestEntry.path.slice(0,-'manifest.json'.length);
   try{
     if(manifestEntry.file.size>30*1024*1024)throw new Error('素材包目录文件过大');
@@ -577,6 +618,8 @@ document.addEventListener('click',async e=>{
   const b=e.target.closest('button');if(!b)return;
   try{
     if(b.hasAttribute('data-new'))showImport();
+    else if(b.hasAttribute('data-local'))showImport('local');
+    else if(b.dataset.importMode)setImportMode(b.dataset.importMode);
     else if(b.hasAttribute('data-import'))$('#folder-input').click();
     else if(b.hasAttribute('data-refresh')){await loadLibrary();toast('素材库已刷新');}
     else if(b.hasAttribute('data-home'))await home();
@@ -623,7 +666,7 @@ document.addEventListener('click',async e=>{
     else if(b.dataset.reviewSource){const item=state.reviews.find(item=>item.id===b.dataset.reviewSource);b.disabled=true;try{if(item)await jumpToReviewSource(item);}finally{b.disabled=false;}}
     else if(b.dataset.cancel){await api('/api/cancel',{id:b.dataset.cancel});await pollJobs();}
     else if(b.dataset.dismiss){dismissed.add(b.dataset.dismiss);await pollJobs();if($('#jobs-area'))$('#jobs-area').innerHTML=jobCards();}
-    else if(b.dataset.retry){const j=state.jobs.find(x=>x.id===b.dataset.retry);if(j.folder&&(j.kind==='analysis'||['analysis','transcribe'].includes(j.stage)))await api('/api/analyze',{folder:j.folder,upgrade:j.upgrade,segment_id:j.segment_id});else await api('/api/download',{url:j.url,analyze:j.analyze,browser:j.browser});dismissed.add(j.id);await pollJobs();}
+    else if(b.dataset.retry){const j=state.jobs.find(x=>x.id===b.dataset.retry);if(j.kind==='local'){if(j.folder)await api('/api/local/resume',{folder:j.folder,analyze:j.analyze!==false});else await api('/api/local/finish',{id:j.import_id});}else if(j.folder&&(j.kind==='analysis'||['analysis','transcribe'].includes(j.stage)))await api('/api/analyze',{folder:j.folder,upgrade:j.upgrade,segment_id:j.segment_id});else await api('/api/download',{url:j.url,analyze:j.analyze,browser:j.browser});dismissed.add(j.id);await pollJobs();}
     else if(b.hasAttribute('data-exit-fullscreen'))document.exitFullscreen();
   }catch(err){toast(err.message);}
 });

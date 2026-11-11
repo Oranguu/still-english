@@ -2,6 +2,7 @@
 import shutil
 import subprocess
 import sys
+import platform
 from pathlib import Path
 
 tool = Path(__file__).resolve().parent
@@ -21,7 +22,12 @@ try:
     subprocess.run(install + ["-r", str(tool / "requirements.txt")], check=True)
     if "--transcription" in sys.argv:
         subprocess.run(install + ["faster-whisper>=1.1,<2"], check=True)
-        print("语音转写组件已安装。首次识别视频时会下载 base.en 英语模型。")
+        if platform.system() == "Darwin" and platform.machine() == "arm64":
+            # Newer NAX kernels can fail on M5 Macs still running macOS 26.1.
+            subprocess.run(install + ["mlx-whisper==0.4.3", "mlx==0.28.0"], check=True)
+            print("语音转写组件已安装。首次识别下载 Whisper large-v3-turbo 模型，使用 Apple Silicon 加速。")
+        else:
+            print("语音转写组件已安装。首次识别下载 Whisper small.en 英语模型，使用本机 CPU。")
     print("\n准备完成。双击「启动.command」就可以开始学习。")
 except subprocess.CalledProcessError:
     print("\n安装未完成，请确认网络连接后重试。")

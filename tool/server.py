@@ -16,6 +16,7 @@ from urllib.parse import unquote, urlparse, parse_qs, quote
 import ai
 import jobs
 import listening
+import local_media
 import reviews
 from captions import read_cues, segment_cues
 from packages import TOOL, ROOT, STATE, atomic_json, safe_path, validate, list_packages, read_package, package_folder, save_package, library_root, migrate_library
@@ -88,7 +89,7 @@ class Handler(BaseHTTPRequestHandler):
             path = unquote(parsed.path)
             query = parse_qs(parsed.query)
             if path == "/api/status":
-                return self.reply({"token": TOKEN, "ai": ai.auth_status(), "root": str(ROOT), "version": "1.4.0", "transcription": bool(jobs.importlib.util.find_spec("faster_whisper"))})
+                return self.reply({"token": TOKEN, "ai": ai.auth_status(), "root": str(ROOT), "version": "1.5.0", "transcription": bool(jobs.speech.backend())})
             if path == "/api/packages":
                 return self.reply({"packages": list_packages()})
             if path == "/api/jobs":
@@ -133,6 +134,13 @@ class Handler(BaseHTTPRequestHandler):
             query = parse_qs(parsed.query)
             if path == "/api/import/file":
                 return self.upload_file(query)
+            if path == "/api/local/file":
+                try:
+                    result = local_media.upload(query.get("id", [""])[0], self.rfile, int(self.headers.get("Content-Length", 0)), STATE)
+                except Exception:
+                    self.close_connection = True
+                    raise
+                return self.reply(result)
             if path == "/api/captions":
                 folder = package_folder(query.get("folder", [""])[0])
                 data = read_package(folder.name)
@@ -152,6 +160,28 @@ class Handler(BaseHTTPRequestHandler):
             data = json.loads(self.body() or b"{}")
             if not isinstance(data, dict):
                 raise ValueError("请求格式无效")
+            if path == "/api/local/start":
+                if any(j.data["status"] in ("running", "queued") for j in jobs.JOBS.values()):
+                    raise ValueError("已有制作任务正在进行，请完成或取消后再选择新视频")
+                return self.reply(local_media.start_import(data, STATE))
+            if path == "/api/local/finish":
+                identifier = data.get("id")
+                _, info = local_media.load_import(identifier, STATE)
+                if not info.get("uploaded"):
+                    raise ValueError("视频还没有复制完成")
+                analyze = data.get("analyze", info["analyze"])
+                if not isinstance(analyze, bool):
+                    raise ValueError("请选择是否生成简单讲解")
+                with jobs.LOCK:
+                    previous = next((j for j in jobs.JOBS.values() if j.data.get("import_id") == identifier and j.data["status"] in ("queued", "running", "complete")), None)
+                    if previous:
+                        return self.reply(previous.data, 202)
+                    return self.reply(jobs.launch("local", {"import_id": identifier, "analyze": analyze}), 202)
+            if path == "/api/local/resume":
+                folder = data.get("folder")
+                if not isinstance(data.get("analyze", True), bool) or read_package(folder).get("source_kind") != "local":
+                    raise ValueError("请选择本地视频素材")
+                return self.reply(jobs.launch("local", {"folder": folder, "analyze": data.get("analyze", True)}), 202)
             if path == "/api/listening/mark":
                 return self.reply(listening.mark_difficulty(data, STATE))
             if path == "/api/listening/grade":
@@ -225,9 +255,9 @@ class Handler(BaseHTTPRequestHandler):
         if not item or name not in {item["manifest"]["video"], item["manifest"].get("poster")}:
             raise ValueError("导入文件无效")
         length = int(self.headers.get("Content-Length", 0))
-        if length <= 0 or length > 8 * 1024 ** 3:
+        if length <= 0 or length > local_media.MAX_BYTES:
             self.close_connection = True
-            raise ValueError("文件为空或大于 8 GB")
+            raise ValueError("文件为空或大于 32 GB")
         target = safe_path(item["folder"], name)
         target.parent.mkdir(parents=True, exist_ok=True)
         temp = target.with_name(target.name + ".uploading")

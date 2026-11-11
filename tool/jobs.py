@@ -17,6 +17,7 @@ from urllib.parse import urlparse, parse_qs
 from captions import read_cues, segment_cues
 from packages import ROOT, STATE, atomic_json, read_package, package_folder, save_package
 import ai
+import transcribe as speech
 
 JOBS = {}
 LOCK = threading.RLock()
@@ -50,6 +51,8 @@ def snapshots():
         if path.stem not in active:
             try:
                 data = json.loads(path.read_text())
+                if not isinstance(data, dict) or not isinstance(data.get("id"), str) or "status" not in data:
+                    continue
                 if data["status"] in ("running", "queued"):
                     data.update(status="interrupted", message="上次运行已中断；可重试，已完成的文件和讲解会保留")
                 active[path.stem] = data
@@ -70,6 +73,19 @@ def launch(kind, details):
             job.update(status="running")
             if kind == "download":
                 download(job)
+            elif kind == "local":
+                if details.get("folder"):
+                    folder = package_folder(details["folder"])
+                    data = read_package(folder.name)
+                    if data.get("source_kind") != "local":
+                        raise ValueError("请选择本地视频素材")
+                else:
+                    import local_media
+                    folder, data = local_media.prepare(details["import_id"], STATE, job, run, ffmpeg_path())
+                if not data["segments"]:
+                    transcribe(folder, data, job)
+                if details.get("analyze", True):
+                    ai.analyze(folder, data, job, run)
             else:
                 folder = package_folder(details["folder"])
                 data = read_package(folder.name)
@@ -79,7 +95,7 @@ def launch(kind, details):
             job.check()
             job.update(status="complete", stage="done", progress=100, message="素材包已准备好，开始学习吧")
         except Cancelled:
-            job.update(status="cancelled", message="已取消，已下载的视频和已完成的讲解会保留")
+            job.update(status="cancelled", message="已取消，视频副本、已完成的识别段落和讲解会保留")
         except Exception as exc:
             job.update(status="error", message=friendly_error(str(exc)))
     threading.Thread(target=target, daemon=True).start()
@@ -121,6 +137,7 @@ def run(command, job, input_text=None, env=None, timeout=1800, logfile=None, qui
                 pass
         started = time.monotonic()
         timed_out = False
+        last_asr = None
         try:
             while process.poll() is None:
                 if job.cancelled.is_set() or time.monotonic() - started > timeout:
@@ -140,6 +157,12 @@ def run(command, job, input_text=None, env=None, timeout=1800, logfile=None, qui
                     if found:
                         value = float(found[-1])
                         job.update(progress=10 + value * .4, message=f"正在下载视频 · {value:.0f}%")
+                if job.data.get("stage") == "transcribe":
+                    matches = re.findall(r"^STILL_ASR (\{[^\n]+\})$", logfile.read_text("utf8", errors="replace")[-16000:], re.M)
+                    if matches and matches[-1] != last_asr:
+                        last_asr = matches[-1]
+                        report = json.loads(last_asr)
+                        job.update(progress=25 + 39 * max(0, min(1, float(report["progress"]))), message=report["message"])
                 time.sleep(.5)
             process.wait()
         finally:
@@ -313,13 +336,15 @@ def download(job):
 
 
 def transcribe(folder, data, job):
-    if not importlib.util.find_spec("faster_whisper"):
+    if not speech.backend():
         raise RuntimeError("视频已保存，但没有可用的英文字幕。请在学习页导入英文 SRT/VTT 文件，或双击 tool/安装语音转写.command 后点击「补全 AI 讲解」。")
     job.update(stage="transcribe", message="正在本地识别英文语音；首次运行需下载语音模型…", progress=60)
-    output = STATE / "jobs" / f"{job.id}-transcript.json"
-    run([sys.executable, str(Path(__file__).parent / "transcribe.py"), str(folder / data["video"]), str(output)], job, quiet=True, timeout=7200)
+    output = STATE / "transcripts" / f"{data['id']}.json"
+    output.parent.mkdir(parents=True, exist_ok=True)
+    run([sys.executable, str(Path(__file__).parent / "transcribe.py"), str(folder / data["video"]), str(output)], job, quiet=True, timeout=12 * 3600)
     data["segments"] = segment_cues(json.loads(output.read_text("utf8")))
     if not data["segments"]:
         raise RuntimeError("没有识别到英文语音，请导入英文字幕")
-    data.update(caption_source="本地语音识别（可能有误差）", status="captions_ready", notice="")
+    metadata = json.loads(output.with_suffix(".metadata.json").read_text("utf8"))
+    data.update(caption_source="本地原音识别 · " + metadata["model"], transcription=metadata, status="captions_ready", notice="字幕由本地英文语音识别生成，未使用随附字幕；音乐、重叠对白和专有名词可能识别有误，请结合原声核对。")
     save_package(folder, data)
